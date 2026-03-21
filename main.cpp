@@ -15,6 +15,7 @@
 #include <CLI/CLI.hpp>
 #include "tsn/Open62541Adapter.h"
 #include "unix_socket/UnixSocketBridge.h"
+#include "name_pipe/NamedPipeBridge.h"
 
 namespace {
 volatile std::sig_atomic_t gStop = 0;
@@ -72,13 +73,11 @@ int main(int argc, char **argv) {
     std::cout << "Mode: " << mode << std::endl;
     std::cout << "Addr: " << addr << std::endl;
 
-    // 当前仅实现 UnixSocket 模式；NamedPipe 预留未来扩展。
+    // 当前仅实现 UnixSocket 与 Windows NamedPipe。
     if (mode == "UnixSocket" || mode == "unixsocket") {
         std::cout << "Starting Unix Socket server at: " << addr << std::endl;
     } else if (mode == "NamedPipe" || mode == "namedpipe") {
         std::cout << "Starting Named Pipe server with name: " << addr << std::endl;
-        std::cerr << "当前仅实现 UnixSocket 模式，NamedPipe 暂未实现。" << std::endl;
-        return 2;
     } else {
         // 理论上不会进入此分支（已由 CLI11 校验）。
         std::cerr << "Invalid mode: " << mode << std::endl;
@@ -86,8 +85,10 @@ int main(int argc, char **argv) {
     }
 
     // 确保 Unix Socket 的父目录存在，避免 bind 失败。
-    if (!ensureSocketParentDir(addr)) {
-        return 5;
+    if (mode == "UnixSocket" || mode == "unixsocket") {
+        if (!ensureSocketParentDir(addr)) {
+            return 5;
+        }
     }
 
     // 注册退出信号，支持 Ctrl+C 或系统终止。
@@ -101,17 +102,8 @@ int main(int argc, char **argv) {
         return 3;
     }
 
-    // 启动 Unix Socket 桥接层：负责本地 socket 与 TSN 的数据转发。
-    UnixSocketBridge bridge(addr);
-    bridge.setTsnSendFunc([&tsnAdapter](const std::string &msg) {
-        // 上行：UnixSocket -> TSN
-        return tsnAdapter.send(msg);
-    });
-    bridge.setTsnRecvSubscribeFunc([&tsnAdapter](std::function<void(const std::string &)> onMsg) {
-        // 下行：TSN -> UnixSocket
-        tsnAdapter.subscribe(std::move(onMsg));
-    });
-    bridge.setConfigFunc([&tsnAdapter](const std::string &line, std::string &reply) {
+    // 解析并应用运行时配置的回调（供 UnixSocket / NamedPipe 复用）。
+    auto configHandler = [&tsnAdapter](const std::string &line, std::string &reply) {
         // 解析配置行：CFG endpoint=... tx=ns:id rx=ns:id
         // 示例：CFG endpoint=opc.tcp://127.0.0.1:4840 tx=2:TsnTx rx=2:TsnRx
         Open62541RuntimeConfig cfg;
@@ -159,22 +151,68 @@ int main(int argc, char **argv) {
                 " tx=" + std::to_string(cfg.txNs) + ":" + cfg.txId +
                 " rx=" + std::to_string(cfg.rxNs) + ":" + cfg.rxId;
         return true;
-    });
+    };
 
-    if (!bridge.start()) {
-        std::cerr << "启动 UnixSocketBridge 失败" << std::endl;
+    if (mode == "UnixSocket" || mode == "unixsocket") {
+        // 启动 Unix Socket 桥接层：负责本地 socket 与 TSN 的数据转发。
+        UnixSocketBridge bridge(addr);
+        bridge.setTsnSendFunc([&tsnAdapter](const std::string &msg) {
+            // 上行：UnixSocket -> TSN
+            return tsnAdapter.send(msg);
+        });
+        bridge.setTsnRecvSubscribeFunc([&tsnAdapter](std::function<void(const std::string &)> onMsg) {
+            // 下行：TSN -> UnixSocket
+            tsnAdapter.subscribe(std::move(onMsg));
+        });
+        bridge.setConfigFunc(configHandler);
+
+        if (!bridge.start()) {
+            std::cerr << "启动 UnixSocketBridge 失败" << std::endl;
+            tsnAdapter.stop();
+            return 4;
+        }
+
+        // 主线程驻留，避免忙等；收到退出信号后进入清理流程。
+        while (!gStop) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+
+        // 退出时按顺序停止：先停 socket，再停 TSN 适配层。
+        bridge.stop();
         tsnAdapter.stop();
-        return 4;
-    }
+    } else if (mode == "NamedPipe" || mode == "namedpipe") {
+#ifdef _WIN32
+        // 启动 Windows NamedPipe 桥接层。
+        NamedPipeBridge bridge(addr);
+        bridge.setTsnSendFunc([&tsnAdapter](const std::string &msg) {
+            // 上行：NamedPipe -> TSN
+            return tsnAdapter.send(msg);
+        });
+        bridge.setTsnRecvSubscribeFunc([&tsnAdapter](std::function<void(const std::string &)> onMsg) {
+            // 下行：TSN -> NamedPipe
+            tsnAdapter.subscribe(std::move(onMsg));
+        });
+        bridge.setConfigFunc(configHandler);
 
-    // 主线程驻留，避免忙等；收到退出信号后进入清理流程。
-    while (!gStop) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
+        if (!bridge.start()) {
+            std::cerr << "启动 NamedPipeBridge 失败" << std::endl;
+            tsnAdapter.stop();
+            return 4;
+        }
 
-    // 退出时按顺序停止：先停 socket，再停 TSN 适配层。
-    bridge.stop();
-    tsnAdapter.stop();
+        // 主线程驻留，避免忙等；收到退出信号后进入清理流程。
+        while (!gStop) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+
+        bridge.stop();
+        tsnAdapter.stop();
+#else
+        std::cerr << "当前平台不支持 Windows NamedPipe 模式。" << std::endl;
+        tsnAdapter.stop();
+        return 2;
+#endif
+    }
 
     std::cout << "TsnHub is stopping... " << addr << std::endl;
 

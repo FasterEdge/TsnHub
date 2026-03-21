@@ -12,6 +12,7 @@ find_package(open62541 REQUIRED)
 add_executable(TsnHub
         main.cpp
         unix_socket/UnixSocketBridge.cpp
+        name_pipe/NamedPipeBridge.cpp
         tsn/Open62541Adapter.cpp
 )
 
