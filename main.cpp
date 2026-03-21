@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <cctype>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -17,6 +18,10 @@
 #include "unix_socket/UnixSocketBridge.h"
 #include "name_pipe/NamedPipeBridge.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace {
 volatile std::sig_atomic_t gStop = 0;
 
@@ -24,6 +29,14 @@ volatile std::sig_atomic_t gStop = 0;
 void onSignal(int) {
     gStop = 1;
 }
+
+#ifdef _WIN32
+// Windows 控制台退出处理，接收 Ctrl+C/关闭窗口等信号。
+BOOL WINAPI consoleHandler(DWORD) {
+    gStop = 1;
+    return TRUE;
+}
+#endif
 
 // 为 Unix Socket 路径创建父目录，避免 bind 时因目录不存在失败。
 bool ensureSocketParentDir(const std::string &socketPath) {
@@ -43,6 +56,14 @@ bool ensureSocketParentDir(const std::string &socketPath) {
         return false;
     }
 }
+
+// 统一转小写，方便模式判断。
+std::string toLower(std::string s) {
+    for (char &ch : s) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return s;
+}
 }
 
 int main(int argc, char **argv) {
@@ -51,12 +72,12 @@ int main(int argc, char **argv) {
     // mode：Windows 默认 NamedPipe，非 Windows 默认 UnixSocket。
 #ifdef _WIN32
     std::string mode = "NamedPipe";
-    // addr：Windows 命名管道名称（可带或不带 \\.\pipe\ 前缀）。
-    std::string addr = "\\\\.\\pipe\\tsn_hub_service";
+    // addr：Windows 命名管道名称，使用 raw string 避免转义。
+    std::string addr = R"(\\.\pipe\tsn_hub_service)";
 #else
     std::string mode = "UnixSocket";
     // addr：Unix 域套接字路径。
-    std::string addr = "/var/run/tsnhub/tsn_hub_service.sock";
+    std::string addr = "/var/run/tsn_hub_service.sock";
 #endif
 
     // 限制 mode 取值范围，避免非法参数进入业务逻辑。
@@ -79,10 +100,14 @@ int main(int argc, char **argv) {
     std::cout << "Mode: " << mode << std::endl;
     std::cout << "Addr: " << addr << std::endl;
 
-    // 当前仅实现 UnixSocket 与 Windows NamedPipe。
-    if (mode == "UnixSocket" || mode == "unixsocket") {
+    // 统一模式小写，避免大小写分支重复。
+    const std::string modeLower = toLower(mode);
+    const bool isUnixSocket = (modeLower == "unixsocket");
+    const bool isNamedPipe = (modeLower == "namedpipe");
+
+    if (isUnixSocket) {
         std::cout << "Starting Unix Socket server at: " << addr << std::endl;
-    } else if (mode == "NamedPipe" || mode == "namedpipe") {
+    } else if (isNamedPipe) {
         std::cout << "Starting Named Pipe server with name: " << addr << std::endl;
     } else {
         // 理论上不会进入此分支（已由 CLI11 校验）。
@@ -91,15 +116,20 @@ int main(int argc, char **argv) {
     }
 
     // 确保 Unix Socket 的父目录存在，避免 bind 失败。
-    if (mode == "UnixSocket" || mode == "unixsocket") {
+    if (isUnixSocket) {
         if (!ensureSocketParentDir(addr)) {
             return 5;
         }
     }
 
+#ifdef _WIN32
+    // Windows 控制台退出处理。
+    SetConsoleCtrlHandler(consoleHandler, TRUE);
+#else
     // 注册退出信号，支持 Ctrl+C 或系统终止。
     std::signal(SIGINT, onSignal);
     std::signal(SIGTERM, onSignal);
+#endif
 
     // 启动 open62541 适配层：负责 TSN 发送与订阅。
     Open62541Adapter tsnAdapter;
@@ -159,7 +189,7 @@ int main(int argc, char **argv) {
         return true;
     };
 
-    if (mode == "UnixSocket" || mode == "unixsocket") {
+    if (isUnixSocket) {
         // 启动 Unix Socket 桥接层：负责本地 socket 与 TSN 的数据转发。
         UnixSocketBridge bridge(addr);
         bridge.setTsnSendFunc([&tsnAdapter](const std::string &msg) {
@@ -186,7 +216,7 @@ int main(int argc, char **argv) {
         // 退出时按顺序停止：先停 socket，再停 TSN 适配层。
         bridge.stop();
         tsnAdapter.stop();
-    } else if (mode == "NamedPipe" || mode == "namedpipe") {
+    } else if (isNamedPipe) {
 #ifdef _WIN32
         // 启动 Windows NamedPipe 桥接层。
         NamedPipeBridge bridge(addr);
