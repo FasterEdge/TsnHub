@@ -48,10 +48,16 @@ bool ensureSocketParentDir(const std::string &socketPath) {
 int main(int argc, char **argv) {
     CLI::App app{"TsnHub for many scenes by FasterEdge"};
 
-    // mode：默认 UnixSocket，可选 NamedPipe（Windows 命名管道）。
+    // mode：Windows 默认 NamedPipe，非 Windows 默认 UnixSocket。
+#ifdef _WIN32
+    std::string mode = "NamedPipe";
+    // addr：Windows 命名管道名称（可带或不带 \\.\pipe\ 前缀）。
+    std::string addr = "\\\\.\\pipe\\tsn_hub_service";
+#else
     std::string mode = "UnixSocket";
-    // addr：Unix 域套接字路径或 Windows 命名管道名称。
+    // addr：Unix 域套接字路径。
     std::string addr = "/var/run/tsnhub/tsn_hub_service.sock";
+#endif
 
     // 限制 mode 取值范围，避免非法参数进入业务逻辑。
     std::vector<std::string> modeChoices = {"UnixSocket", "NamedPipe"};
