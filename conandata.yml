@@ -1,0 +1,6 @@
+# This file is managed by Conan, contents will be overwritten.
+# To keep your changes, remove these comment lines, but the plugin won't be able to modify your requirements
+
+requirements:
+  - "cli11/2.6.0"
+  - "open62541/1.5.0"

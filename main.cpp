@@ -1,0 +1,183 @@
+//
+// https://github.com/FasterEdge
+// 由 tyza66 于 2026/3/21 创建。
+//
+#include <csignal>
+#include <chrono>
+#include <cstring>
+#include <filesystem>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <CLI/CLI.hpp>
+#include "tsn/Open62541Adapter.h"
+#include "unix_socket/UnixSocketBridge.h"
+
+namespace {
+volatile std::sig_atomic_t gStop = 0;
+
+// 信号处理函数中只做最小工作：设置退出标志。
+void onSignal(int) {
+    gStop = 1;
+}
+
+// 为 Unix Socket 路径创建父目录，避免 bind 时因目录不存在失败。
+bool ensureSocketParentDir(const std::string &socketPath) {
+    namespace fs = std::filesystem;
+    try {
+        fs::path p(socketPath);
+        fs::path parent = p.parent_path();
+        if (parent.empty()) {
+            return true;
+        }
+        if (fs::exists(parent)) {
+            return true;
+        }
+        return fs::create_directories(parent);
+    } catch (const std::exception &e) {
+        std::cerr << "创建 socket 父目录失败: " << e.what() << std::endl;
+        return false;
+    }
+}
+}
+
+int main(int argc, char **argv) {
+    CLI::App app{"TsnHub for many scenes by FasterEdge"};
+
+    // mode：默认 UnixSocket，可选 NamedPipe（Windows 命名管道）。
+    std::string mode = "UnixSocket";
+    // addr：Unix 域套接字路径或 Windows 命名管道名称。
+    std::string addr = "/var/run/tsnhub/tsn_hub_service.sock";
+
+    // 限制 mode 取值范围，避免非法参数进入业务逻辑。
+    std::vector<std::string> modeChoices = {"UnixSocket", "NamedPipe"};
+
+    app.add_option("-m,--mode", mode, "Mode: UnixSocket (default) or NamedPipe")
+            ->check(CLI::IsMember(modeChoices, CLI::ignore_case));
+    app.add_option("-a,--addr", addr, "Unix socket path or Windows named pipe name");
+
+    try {
+        // 解析命令行参数，若有错误会抛出异常。
+        app.parse(argc, argv);
+    } catch (const CLI::ParseError &e) {
+        // CLI11 会输出错误信息与帮助文本，并返回合适的退出码。
+        return app.exit(e);
+    }
+
+    // 输出配置信息，便于日志排查。
+    std::cout << "TsnHub for many scenes by FasterEdge" << std::endl;
+    std::cout << "Mode: " << mode << std::endl;
+    std::cout << "Addr: " << addr << std::endl;
+
+    // 当前仅实现 UnixSocket 模式；NamedPipe 预留未来扩展。
+    if (mode == "UnixSocket" || mode == "unixsocket") {
+        std::cout << "Starting Unix Socket server at: " << addr << std::endl;
+    } else if (mode == "NamedPipe" || mode == "namedpipe") {
+        std::cout << "Starting Named Pipe server with name: " << addr << std::endl;
+        std::cerr << "当前仅实现 UnixSocket 模式，NamedPipe 暂未实现。" << std::endl;
+        return 2;
+    } else {
+        // 理论上不会进入此分支（已由 CLI11 校验）。
+        std::cerr << "Invalid mode: " << mode << std::endl;
+        return 1;
+    }
+
+    // 确保 Unix Socket 的父目录存在，避免 bind 失败。
+    if (!ensureSocketParentDir(addr)) {
+        return 5;
+    }
+
+    // 注册退出信号，支持 Ctrl+C 或系统终止。
+    std::signal(SIGINT, onSignal);
+    std::signal(SIGTERM, onSignal);
+
+    // 启动 open62541 适配层：负责 TSN 发送与订阅。
+    Open62541Adapter tsnAdapter;
+    if (!tsnAdapter.start()) {
+        std::cerr << "启动 Open62541Adapter 失败" << std::endl;
+        return 3;
+    }
+
+    // 启动 Unix Socket 桥接层：负责本地 socket 与 TSN 的数据转发。
+    UnixSocketBridge bridge(addr);
+    bridge.setTsnSendFunc([&tsnAdapter](const std::string &msg) {
+        // 上行：UnixSocket -> TSN
+        return tsnAdapter.send(msg);
+    });
+    bridge.setTsnRecvSubscribeFunc([&tsnAdapter](std::function<void(const std::string &)> onMsg) {
+        // 下行：TSN -> UnixSocket
+        tsnAdapter.subscribe(std::move(onMsg));
+    });
+    bridge.setConfigFunc([&tsnAdapter](const std::string &line, std::string &reply) {
+        // 解析配置行：CFG endpoint=... tx=ns:id rx=ns:id
+        // 示例：CFG endpoint=opc.tcp://127.0.0.1:4840 tx=2:TsnTx rx=2:TsnRx
+        Open62541RuntimeConfig cfg;
+        std::istringstream iss(line);
+        std::string token;
+        iss >> token; // CFG
+        while (iss >> token) {
+            if (token.rfind("endpoint=", 0) == 0) {
+                cfg.endpoint = token.substr(std::strlen("endpoint="));
+            } else if (token.rfind("tx=", 0) == 0) {
+                std::string v = token.substr(3);
+                auto p = v.find(':');
+                if (p == std::string::npos) {
+                    reply = "ERR tx 格式应为 ns:id";
+                    return false;
+                }
+                cfg.txNs = static_cast<uint16_t>(std::stoi(v.substr(0, p)));
+                cfg.txId = v.substr(p + 1);
+            } else if (token.rfind("rx=", 0) == 0) {
+                std::string v = token.substr(3);
+                auto p = v.find(':');
+                if (p == std::string::npos) {
+                    reply = "ERR rx 格式应为 ns:id";
+                    return false;
+                }
+                cfg.rxNs = static_cast<uint16_t>(std::stoi(v.substr(0, p)));
+                cfg.rxId = v.substr(p + 1);
+            }
+        }
+
+        // 必要字段校验。
+        if (cfg.endpoint.empty() || cfg.txId.empty() || cfg.rxId.empty()) {
+            reply = "ERR 缺少必要参数 endpoint/tx/rx";
+            return false;
+        }
+
+        // 应用配置（运行中会触发重连）。
+        bool ok = tsnAdapter.configure(cfg);
+        if (!ok) {
+            reply = "ERR 配置应用失败";
+            return false;
+        }
+
+        reply = "OK endpoint=" + cfg.endpoint +
+                " tx=" + std::to_string(cfg.txNs) + ":" + cfg.txId +
+                " rx=" + std::to_string(cfg.rxNs) + ":" + cfg.rxId;
+        return true;
+    });
+
+    if (!bridge.start()) {
+        std::cerr << "启动 UnixSocketBridge 失败" << std::endl;
+        tsnAdapter.stop();
+        return 4;
+    }
+
+    // 主线程驻留，避免忙等；收到退出信号后进入清理流程。
+    while (!gStop) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    // 退出时按顺序停止：先停 socket，再停 TSN 适配层。
+    bridge.stop();
+    tsnAdapter.stop();
+
+    std::cout << "TsnHub is stopping... " << addr << std::endl;
+
+    return 0;
+}
+

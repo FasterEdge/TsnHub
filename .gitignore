@@ -1,0 +1,76 @@
+# Build directories
+/build/
+/build-*/
+cmake-build-*/
+out/
+bin/
+lib/
+lib64/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+build.ninja
+*.ninja
+
+# Object / binaries
+*.o
+*.obj
+*.lo
+*.la
+*.lai
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.lib
+
+# Conan
+conanbuildinfo.*
+conaninfo.txt
+conan.lock
+conan_export.tgz
+conanfile.txt.user
+.conan/
+.conan2/
+conan_data/
+
+# IDEs / editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*~
+tags
+
+# Visual Studio
+*.sln
+*.vcxproj*
+.vs/
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+
+# macOS
+.DS_Store
+
+# Logs / archives / temporary
+*.log
+*.tmp
+*.bak
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+main
