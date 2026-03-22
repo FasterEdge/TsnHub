@@ -30,6 +30,8 @@ public:
 
     // 运行时配置（可在运行中调用，将触发重连）。
     bool configure(const Open62541RuntimeConfig &cfg);
+    // 可选：手工启停连接（UnixSocket/NamedPipe 默认不连，收到 CFG 后才连）。
+    void setConnectEnabled(bool enabled);
 
     // 上行：UnixSocket -> TSN（写入 tx 节点）。
     bool send(const std::string &payload);
@@ -55,6 +57,7 @@ private:
 private:
     std::atomic<bool> running_{false};
     std::atomic<bool> reconfigureRequested_{false};
+    std::atomic<bool> connectEnabled_{false};
     std::thread clientLoopThread_;
 
     std::mutex mu_;

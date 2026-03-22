@@ -45,10 +45,19 @@ bool Open62541Adapter::configure(const Open62541RuntimeConfig &cfg) {
         std::lock_guard<std::mutex> lk(mu_);
         cfg_ = cfg;
     }
+    connectEnabled_.store(true);
     if (running_.load()) {
         reconfigureRequested_.store(true);
     }
     return true;
+}
+
+void Open62541Adapter::setConnectEnabled(bool enabled) {
+    if (!enabled) {
+        std::lock_guard<std::mutex> lk(mu_);
+        disconnectLocked();
+    }
+    connectEnabled_.store(enabled);
 }
 
 void Open62541Adapter::subscribe(std::function<void(const std::string &)> onMsg) {
@@ -149,6 +158,12 @@ void Open62541Adapter::disconnectLocked() {
 
 void Open62541Adapter::loop() {
     while (running_.load()) {
+        // 未收到连接指令时，保持空转等待。
+        if (!connectEnabled_.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            continue;
+        }
+
         bool connected = false;
         {
             std::lock_guard<std::mutex> lk(mu_);
@@ -164,6 +179,12 @@ void Open62541Adapter::loop() {
         while (running_.load()) {
             // 收到配置更新时，触发重连。
             if (reconfigureRequested_.exchange(false)) {
+                std::lock_guard<std::mutex> lk(mu_);
+                disconnectLocked();
+                break;
+            }
+            // 外部关闭连接开关时，立即断开并等待下一次开启。
+            if (!connectEnabled_.load()) {
                 std::lock_guard<std::mutex> lk(mu_);
                 disconnectLocked();
                 break;
@@ -193,6 +214,10 @@ void Open62541Adapter::loop() {
 
 bool Open62541Adapter::send(const std::string &payload) {
     std::lock_guard<std::mutex> lk(mu_);
+    if (!connectEnabled_.load()) {
+        std::cerr << "[Open62541Adapter] send 失败：连接未开启" << std::endl;
+        return false;
+    }
     if (!client_) {
         std::cerr << "[Open62541Adapter] send 失败：客户端未连接" << std::endl;
         return false;

@@ -105,17 +105,21 @@ int main(int argc, char **argv) {
 #endif
 
     // 限制 mode 取值范围，避免非法参数进入业务逻辑。
+    // UnixSocket   使用 Unix 域套接字进行本地通信，适用于 Linux/macOS。
+    // NamedPipe    专用于 Windows 的命名管道通信机制，适用于 Windows。
+    // CommandLine  专用于命令行交互，适用于调试或无本地通信需求的场景（若作为子进程模式管理，则可借以交互）。
     std::vector<std::string> modeChoices = {"UnixSocket", "NamedPipe", "CommandLine"};
 
+    // 添加命令行参数定义
     app.add_option("-m,--mode", mode, "Mode: UnixSocket (default) or NamedPipe or CommandLine")
             ->check(CLI::IsMember(modeChoices, CLI::ignore_case));
     app.add_option("-a,--addr", addr, "Unix socket path or Windows named pipe name");
 
-    // CommandLine 模式参数：通过 CLI 设置 UA 端点与节点。
-    std::string endpoint;
-    std::string tx;
-    std::string rx;
-    app.add_option("--endpoint", endpoint, "OPC UA endpoint for CommandLine mode");
+    // CommandLine 模式参数：通过 CLI 设置 UA 端点与节点（可选）。
+    std::string endpoint; // UA 服务器地址，例如 opc.tcp://
+    std::string tx;       // 上行节点 id，例如 2:TsnTx
+    std::string rx;       // 下行节点 id，例如 2:TsnRx
+    app.add_option("--endpoint", endpoint, "OPC UA endpoint for CommandLine mode (optional; use connect command if omitted)");
     app.add_option("--tx", tx, "Tx node id in ns:id for CommandLine mode");
     app.add_option("--rx", rx, "Rx node id in ns:id for CommandLine mode");
 
@@ -175,32 +179,31 @@ int main(int argc, char **argv) {
 
     // CommandLine 模式：通过命令行参数配置 UA，并用 stdin/stdout 交互。
     if (isCommandLine) {
-        if (endpoint.empty() || tx.empty() || rx.empty()) {
-            std::cerr << "CommandLine 模式需要 --endpoint --tx --rx" << std::endl;
-            tsnAdapter.stop();
-            return 6;
-        }
-
-        Open62541RuntimeConfig cfg;
-        cfg.endpoint = endpoint;
-        std::string err;
-        if (!parseNsId(tx, cfg.txNs, cfg.txId, err)) {
-            std::cerr << err << std::endl;
-            tsnAdapter.stop();
-            return 6;
-        }
-        if (!parseNsId(rx, cfg.rxNs, cfg.rxId, err)) {
-            std::cerr << err << std::endl;
-            tsnAdapter.stop();
-            return 6;
-        }
-
         CommandLineBridge bridge;
         bridge.bindAdapter(&tsnAdapter);
-        if (!bridge.configure(cfg, err)) {
-            std::cerr << err << std::endl;
-            tsnAdapter.stop();
-            return 6;
+
+        // 若提供了完整 endpoint/tx/rx，则预配置；否则等待 connect 指令。
+        if (!endpoint.empty() && !tx.empty() && !rx.empty()) {
+            Open62541RuntimeConfig cfg;
+            cfg.endpoint = endpoint;
+            std::string err;
+            if (!parseNsId(tx, cfg.txNs, cfg.txId, err)) {
+                std::cerr << err << std::endl;
+                tsnAdapter.stop();
+                return 6;
+            }
+            if (!parseNsId(rx, cfg.rxNs, cfg.rxId, err)) {
+                std::cerr << err << std::endl;
+                tsnAdapter.stop();
+                return 6;
+            }
+            if (!bridge.configure(cfg, err)) {
+                std::cerr << err << std::endl;
+                tsnAdapter.stop();
+                return 6;
+            }
+        } else {
+            std::cout << "CommandLine 模式：未提供 endpoint/tx/rx，等待 connect 指令" << std::endl;
         }
 
         bridge.run(&gStop);
