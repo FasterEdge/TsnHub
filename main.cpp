@@ -17,56 +17,80 @@
 #include "tsn/Open62541Adapter.h"
 #include "unix_socket/UnixSocketBridge.h"
 #include "name_pipe/NamedPipeBridge.h"
+#include "command_line/CommandLineBridge.h"
 
-#ifdef _WIN32
+#ifdef _WIN32 // 这个宏在Windows上才生效
 #include <windows.h>
 #endif
 
+// 这里放一些全局工具函数和变量，避免污染业务逻辑。
 namespace {
-volatile std::sig_atomic_t gStop = 0;
+    volatile std::sig_atomic_t gStop = 0;
 
-// 信号处理函数中只做最小工作：设置退出标志。
-void onSignal(int) {
-    gStop = 1;
-}
+    // 信号处理函数中只做最小工作：设置退出标志。
+    void onSignal(int) {
+        gStop = 1;
+    }
 
 #ifdef _WIN32
-// Windows 控制台退出处理，接收 Ctrl+C/关闭窗口等信号。
+    // Windows 控制台退出处理，接收 Ctrl+C/关闭窗口等信号。
 BOOL WINAPI consoleHandler(DWORD) {
-    gStop = 1;
-    return TRUE;
-}
+        gStop = 1;
+        return TRUE;
+    }
 #endif
 
-// 为 Unix Socket 路径创建父目录，避免 bind 时因目录不存在失败。
-bool ensureSocketParentDir(const std::string &socketPath) {
-    namespace fs = std::filesystem;
-    try {
-        fs::path p(socketPath);
-        fs::path parent = p.parent_path();
-        if (parent.empty()) {
-            return true;
+    // 为 Unix Socket 路径创建父目录，避免 bind 时因目录不存在失败。
+    bool ensureSocketParentDir(const std::string &socketPath) {
+        namespace fs = std::filesystem;
+        try {
+            fs::path p(socketPath);
+            fs::path parent = p.parent_path();
+            if (parent.empty()) {
+                return true;
+            }
+            if (fs::exists(parent)) {
+                return true;
+            }
+            return fs::create_directories(parent);
+        } catch (const std::exception &e) {
+            std::cerr << "创建 socket 父目录失败: " << e.what() << std::endl;
+            return false;
         }
-        if (fs::exists(parent)) {
-            return true;
-        }
-        return fs::create_directories(parent);
-    } catch (const std::exception &e) {
-        std::cerr << "创建 socket 父目录失败: " << e.what() << std::endl;
-        return false;
     }
-}
 
-// 统一转小写，方便模式判断。
-std::string toLower(std::string s) {
-    for (char &ch : s) {
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    // 统一转小写，方便模式判断。
+    std::string toLower(std::string s) {
+        for (char &ch: s) {
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        return s;
     }
-    return s;
-}
+
+    // 解析 "ns:id" 形式。
+    bool parseNsId(const std::string &v, uint16_t &ns, std::string &id, std::string &err) {
+        auto p = v.find(':');
+        if (p == std::string::npos) {
+            err = "ERR 格式应为 ns:id";
+            return false;
+        }
+        try {
+            ns = static_cast<uint16_t>(std::stoi(v.substr(0, p)));
+        } catch (...) {
+            err = "ERR ns 应为数字";
+            return false;
+        }
+        id = v.substr(p + 1);
+        if (id.empty()) {
+            err = "ERR id 不能为空";
+            return false;
+        }
+        return true;
+    }
 }
 
 int main(int argc, char **argv) {
+    // 创建CLI体系，并设置描述信息。
     CLI::App app{"TsnHub for many scenes by FasterEdge"};
 
     // mode：Windows 默认 NamedPipe，非 Windows 默认 UnixSocket。
@@ -81,11 +105,19 @@ int main(int argc, char **argv) {
 #endif
 
     // 限制 mode 取值范围，避免非法参数进入业务逻辑。
-    std::vector<std::string> modeChoices = {"UnixSocket", "NamedPipe"};
+    std::vector<std::string> modeChoices = {"UnixSocket", "NamedPipe", "CommandLine"};
 
-    app.add_option("-m,--mode", mode, "Mode: UnixSocket (default) or NamedPipe")
+    app.add_option("-m,--mode", mode, "Mode: UnixSocket (default) or NamedPipe or CommandLine")
             ->check(CLI::IsMember(modeChoices, CLI::ignore_case));
     app.add_option("-a,--addr", addr, "Unix socket path or Windows named pipe name");
+
+    // CommandLine 模式参数：通过 CLI 设置 UA 端点与节点。
+    std::string endpoint;
+    std::string tx;
+    std::string rx;
+    app.add_option("--endpoint", endpoint, "OPC UA endpoint for CommandLine mode");
+    app.add_option("--tx", tx, "Tx node id in ns:id for CommandLine mode");
+    app.add_option("--rx", rx, "Rx node id in ns:id for CommandLine mode");
 
     try {
         // 解析命令行参数，若有错误会抛出异常。
@@ -104,11 +136,14 @@ int main(int argc, char **argv) {
     const std::string modeLower = toLower(mode);
     const bool isUnixSocket = (modeLower == "unixsocket");
     const bool isNamedPipe = (modeLower == "namedpipe");
+    const bool isCommandLine = (modeLower == "commandline");
 
     if (isUnixSocket) {
         std::cout << "Starting Unix Socket server at: " << addr << std::endl;
     } else if (isNamedPipe) {
         std::cout << "Starting Named Pipe server with name: " << addr << std::endl;
+    } else if (isCommandLine) {
+        std::cout << "Starting CommandLine mode" << std::endl;
     } else {
         // 理论上不会进入此分支（已由 CLI11 校验）。
         std::cerr << "Invalid mode: " << mode << std::endl;
@@ -136,6 +171,43 @@ int main(int argc, char **argv) {
     if (!tsnAdapter.start()) {
         std::cerr << "启动 Open62541Adapter 失败" << std::endl;
         return 3;
+    }
+
+    // CommandLine 模式：通过命令行参数配置 UA，并用 stdin/stdout 交互。
+    if (isCommandLine) {
+        if (endpoint.empty() || tx.empty() || rx.empty()) {
+            std::cerr << "CommandLine 模式需要 --endpoint --tx --rx" << std::endl;
+            tsnAdapter.stop();
+            return 6;
+        }
+
+        Open62541RuntimeConfig cfg;
+        cfg.endpoint = endpoint;
+        std::string err;
+        if (!parseNsId(tx, cfg.txNs, cfg.txId, err)) {
+            std::cerr << err << std::endl;
+            tsnAdapter.stop();
+            return 6;
+        }
+        if (!parseNsId(rx, cfg.rxNs, cfg.rxId, err)) {
+            std::cerr << err << std::endl;
+            tsnAdapter.stop();
+            return 6;
+        }
+
+        CommandLineBridge bridge;
+        bridge.bindAdapter(&tsnAdapter);
+        if (!bridge.configure(cfg, err)) {
+            std::cerr << err << std::endl;
+            tsnAdapter.stop();
+            return 6;
+        }
+
+        bridge.run(&gStop);
+
+        tsnAdapter.stop();
+        std::cout << "TsnHub is stopping... " << addr << std::endl;
+        return 0;
     }
 
     // 解析并应用运行时配置的回调（供 UnixSocket / NamedPipe 复用）。
@@ -254,4 +326,3 @@ int main(int argc, char **argv) {
 
     return 0;
 }
-

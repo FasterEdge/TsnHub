@@ -13,6 +13,7 @@ add_executable(TsnHub
         main.cpp
         unix_socket/UnixSocketBridge.cpp
         name_pipe/NamedPipeBridge.cpp
+        command_line/CommandLineBridge.cpp
         tsn/Open62541Adapter.cpp
 )
 

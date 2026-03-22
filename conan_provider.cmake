@@ -320,10 +320,12 @@ function(detect_build_type build_type)
 endfunction()
 
 
-macro(set_conan_compiler_if_appleclang lang command output_variable)
+macro(set_conan_compiler_if_appleclang lang command_line output_variable)
     if(CMAKE_${lang}_COMPILER_ID STREQUAL "AppleClang")
-        execute_process(COMMAND xcrun --find ${command}
-            OUTPUT_VARIABLE _xcrun_out OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(NOT "${command_line}" STREQUAL "")
+            execute_process(COMMAND xcrun --find ${command_line}
+                OUTPUT_VARIABLE _xcrun_out OUTPUT_STRIP_TRAILING_WHITESPACE)
+        endif()
         cmake_path(GET _xcrun_out PARENT_PATH _xcrun_toolchain_path)
         cmake_path(GET CMAKE_${lang}_COMPILER PARENT_PATH _compiler_parent_path)
         if ("${_xcrun_toolchain_path}" STREQUAL "${_compiler_parent_path}")
@@ -343,7 +345,7 @@ macro(append_compiler_executables_configuration)
     set(_conan_compilers_list "")
     if(CMAKE_C_COMPILER)
         set(_conan_c_compiler "\"c\":\"${CMAKE_C_COMPILER}\"")
-        set_conan_compiler_if_appleclang(C cc _conan_c_compiler)
+        set_conan_compiler_if_appleclang(C "cc" _conan_c_compiler)
         list(APPEND _conan_compilers_list ${_conan_c_compiler})
     else()
         message(WARNING "CMake-Conan: The C compiler is not defined. "
@@ -351,7 +353,7 @@ macro(append_compiler_executables_configuration)
     endif()
     if(CMAKE_CXX_COMPILER)
         set(_conan_cpp_compiler "\"cpp\":\"${CMAKE_CXX_COMPILER}\"")
-        set_conan_compiler_if_appleclang(CXX c++ _conan_cpp_compiler)
+        set_conan_compiler_if_appleclang(CXX "c++" _conan_cpp_compiler)
         list(APPEND _conan_compilers_list ${_conan_cpp_compiler})
     else()
         message(WARNING "CMake-Conan: The C++ compiler is not defined. "
@@ -518,7 +520,7 @@ endfunction()
 
 function(conan_get_version conan_command conan_current_version)
     execute_process(
-        COMMAND ${conan_command} --version
+            COMMAND ${conan_command} --version
         OUTPUT_VARIABLE conan_output
         RESULT_VARIABLE conan_result
         OUTPUT_STRIP_TRAILING_WHITESPACE
