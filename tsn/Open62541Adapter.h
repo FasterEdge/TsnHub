@@ -9,7 +9,6 @@
 #include <open62541/server.h>
 #include <open62541/server_config_default.h>
 #include <open62541/plugin/log_stdout.h>
-#include <open62541/networkmessage.h>
 
 // 运行角色：发布者 / 订阅者 / 双角色。
 enum class PubSubRole { Publisher, Subscriber, Both };
@@ -54,11 +53,6 @@ private:
     void teardownLocked();
     void loop();
 
-    // Subscriber 回调。
-    static void readerDataSetListener(UA_Server *server, UA_UInt32 readerId,
-                                      void *readerContext, const UA_ByteString *msg,
-                                      const UA_NetworkMessage *nm);
-
 private:
     std::atomic<bool> running_{false};
     std::atomic<bool> reconfigureRequested_{false};
@@ -68,6 +62,7 @@ private:
     std::mutex mu_;
     PubSubConfig cfg_{};
     std::function<void(const std::string &)> onMsg_;
+    std::string lastDelivered_;
 
     UA_Server *server_{nullptr};
     UA_NodeId publishedDataSet_{UA_NODEID_NULL};

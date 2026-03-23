@@ -98,49 +98,13 @@ bool Open62541Adapter::send(const std::string &payload) {
     return true;
 }
 
-void Open62541Adapter::readerDataSetListener(UA_Server *server, UA_UInt32 readerId,
-                                             void *readerContext, const UA_ByteString *msg,
-                                             const UA_NetworkMessage *nm) {
-    (void)server;
-    (void)readerId;
-    (void)msg;
-    auto *self = static_cast<Open62541Adapter *>(readerContext);
-    if (!self || !nm) {
-        return;
-    }
-    if (nm->payloadHeaderEnabled && nm->payloadHeader.dataSetPayloadHeader.count > 0) {
-        for (size_t i = 0; i < nm->payloadHeader.dataSetPayloadHeader.count; ++i) {
-            const UA_DataSetMessage *dsm = &nm->payload.dataSetPayload.dataSetMessages[i];
-            if (dsm->header.dataSetMessageType != UA_DATASETMESSAGETYPE_KEYFRAME) {
-                continue;
-            }
-            if (dsm->data.keyFrameData.fieldCount == 0) {
-                continue;
-            }
-            const UA_Variant *v = &dsm->data.keyFrameData.dataSetFields[0].value;
-            if (UA_Variant_hasScalarType(v, &UA_TYPES[UA_TYPES_STRING])) {
-                UA_String *s = (UA_String *)v->data;
-                std::string payload(reinterpret_cast<const char *>(s->data), s->length);
-                std::function<void(const std::string &)> cb;
-                {
-                    std::lock_guard<std::mutex> lk(self->mu_);
-                    cb = self->onMsg_;
-                }
-                if (cb) {
-                    cb(payload);
-                }
-            }
-        }
-    }
-}
-
 bool Open62541Adapter::setupPubSubLocked() {
     teardownLocked();
 
     server_ = UA_Server_new();
     UA_ServerConfig_setDefault(UA_Server_getConfig(server_));
 
-    // 创建数据变量，作为发布数据源。
+    // 创建数据变量，作为发布数据源/订阅目标。
     UA_VariableAttributes attr = UA_VariableAttributes_default;
     UA_String init = UA_STRING("init");
     UA_Variant_setScalar(&attr.value, &init, &UA_TYPES[UA_TYPES_STRING]);
@@ -274,8 +238,13 @@ bool Open62541Adapter::setupPubSubLocked() {
             return false;
         }
 
-        // 设置回调。
-        UA_Server_DataSetReader_setSubscriberCallback(server_, dataSetReader_, readerDataSetListener, this);
+        // 将订阅字段映射到本地变量，便于后续轮询输出。
+        UA_FieldTargetDataType target;
+        UA_FieldTargetDataType_init(&target);
+        target.dataSetFieldId = 0;
+        target.attributeId = UA_ATTRIBUTEID_VALUE;
+        target.targetNodeId = payloadVar_;
+        UA_Server_DataSetReader_addTargetVariables(server_, dataSetReader_, &target, 1);
     }
 
     return true;
@@ -297,6 +266,7 @@ void Open62541Adapter::teardownLocked() {
         UA_NodeId_clear(&payloadVar_);
         payloadVar_ = UA_NODEID_NULL;
     }
+    lastDelivered_.clear();
 }
 
 void Open62541Adapter::loop() {
@@ -316,7 +286,7 @@ void Open62541Adapter::loop() {
             continue;
         }
 
-        // 主循环：驱动 UA_Server_run_iterate。
+        // 主循环：驱动 UA_Server_run_iterate，并在订阅模式下轮询变量。
         while (running_.load()) {
             if (reconfigureRequested_.exchange(false) || !connectEnabled_.load()) {
                 std::lock_guard<std::mutex> lk(mu_);
@@ -326,6 +296,36 @@ void Open62541Adapter::loop() {
             UA_UInt16 timeoutMs = static_cast<UA_UInt16>(cfg_.publishIntervalMs);
             if (timeoutMs == 0) timeoutMs = 10;
             UA_Server_run_iterate(server_, true);
+
+            if (isSubscriber(cfg_)) {
+                UA_Variant val;
+                UA_Variant_init(&val);
+                if (UA_Server_readValue(server_, payloadVar_, &val) == UA_STATUSCODE_GOOD &&
+                    UA_Variant_hasScalarType(&val, &UA_TYPES[UA_TYPES_STRING])) {
+                    UA_String *s = (UA_String *)val.data;
+                    std::string payload(reinterpret_cast<const char *>(s->data), s->length);
+                    bool changed = false;
+                    {
+                        std::lock_guard<std::mutex> lk(mu_);
+                        if (payload != lastDelivered_) {
+                            lastDelivered_ = payload;
+                            changed = true;
+                        }
+                    }
+                    if (changed) {
+                        std::function<void(const std::string &)> cb;
+                        {
+                            std::lock_guard<std::mutex> lk(mu_);
+                            cb = onMsg_;
+                        }
+                        if (cb) {
+                            cb(payload);
+                        }
+                    }
+                }
+                UA_Variant_clear(&val);
+            }
+
             std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMs));
         }
     }

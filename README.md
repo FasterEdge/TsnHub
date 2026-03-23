@@ -1,6 +1,6 @@
 # TsnHub
 
-TsnHub 是一个将本地 IPC（Unix Socket / Windows NamedPipe / CommandLine）与 OPC UA(open62541) 进行桥接的工具，用于 TSN 消息代发代收。
+TsnHub是一个将本地 IPCUnix Socket / Windows NamedPipe / CommandLine）与 OPC UA(open62541) 进行桥接的工具，用于 TSN 消息代发代收。
 
 ## 功能概览
 
