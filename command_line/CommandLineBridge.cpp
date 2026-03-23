@@ -13,31 +13,11 @@ std::string toLower(std::string s) {
     }
     return s;
 }
-
-bool parseNsId(const std::string &v, uint16_t &ns, std::string &id, std::string &err) {
-    auto p = v.find(':');
-    if (p == std::string::npos) {
-        err = "ERR 格式应为 ns:id";
-        return false;
-    }
-    try {
-        ns = static_cast<uint16_t>(std::stoi(v.substr(0, p)));
-    } catch (...) {
-        err = "ERR ns 应为数字";
-        return false;
-    }
-    id = v.substr(p + 1);
-    if (id.empty()) {
-        err = "ERR id 不能为空";
-        return false;
-    }
-    return true;
-}
 }
 
-bool CommandLineBridge::configure(const Open62541RuntimeConfig &cfg, std::string &err) {
-    if (cfg.endpoint.empty() || cfg.txId.empty() || cfg.rxId.empty()) {
-        err = "ERR 缺少必要参数 endpoint/tx/rx";
+bool CommandLineBridge::configure(const PubSubConfig &cfg, std::string &err) {
+    if (cfg.address.empty()) {
+        err = "ERR 缺少必要参数 address";
         return false;
     }
     cfg_ = cfg;
@@ -82,27 +62,30 @@ void CommandLineBridge::run(volatile std::sig_atomic_t *stopFlag) {
         std::string cmdLower = toLower(cmd);
 
         if (cmdLower == "connect") {
-            Open62541RuntimeConfig cfg;
+            PubSubConfig cfg;
             std::string token;
             std::string err;
             while (iss >> token) {
-                if (token.rfind("endpoint=", 0) == 0) {
-                    cfg.endpoint = token.substr(std::strlen("endpoint="));
-                } else if (token.rfind("tx=", 0) == 0) {
-                    std::string v = token.substr(3);
-                    if (!parseNsId(v, cfg.txNs, cfg.txId, err)) {
-                        break;
-                    }
-                } else if (token.rfind("rx=", 0) == 0) {
-                    std::string v = token.substr(3);
-                    if (!parseNsId(v, cfg.rxNs, cfg.rxId, err)) {
-                        break;
-                    }
+                if (token.rfind("role=", 0) == 0) {
+                    cfg.role = toLower(token.substr(5)) == "publisher" ? PubSubRole::Publisher :
+                                (toLower(token.substr(5)) == "subscriber" ? PubSubRole::Subscriber : PubSubRole::Both);
+                } else if (token.rfind("address=", 0) == 0) {
+                    cfg.address = token.substr(8);
+                } else if (token.rfind("publisherId=", 0) == 0) {
+                    cfg.publisherId = static_cast<uint16_t>(std::stoi(token.substr(12)));
+                } else if (token.rfind("writerId=", 0) == 0) {
+                    cfg.writerId = static_cast<uint16_t>(std::stoi(token.substr(9)));
+                } else if (token.rfind("readerId=", 0) == 0) {
+                    cfg.readerId = static_cast<uint16_t>(std::stoi(token.substr(9)));
+                } else if (token.rfind("interval=", 0) == 0) {
+                    cfg.publishIntervalMs = static_cast<uint32_t>(std::stoul(token.substr(9)));
+                } else if (token.rfind("field=", 0) == 0) {
+                    cfg.fieldName = token.substr(6);
                 }
             }
 
-            if (!err.empty() || cfg.endpoint.empty() || cfg.txId.empty() || cfg.rxId.empty()) {
-                std::cerr << (err.empty() ? "ERR connect 参数不完整" : err) << std::endl;
+            if (cfg.address.empty()) {
+                std::cerr << "ERR connect 需要 address" << std::endl;
                 continue;
             }
 
@@ -111,9 +94,13 @@ void CommandLineBridge::run(volatile std::sig_atomic_t *stopFlag) {
                 continue;
             }
             configured_ = true;
-            std::cout << "OK 已连接 endpoint=" << cfg.endpoint
-                      << " tx=" << cfg.txNs << ":" << cfg.txId
-                      << " rx=" << cfg.rxNs << ":" << cfg.rxId << std::endl;
+            std::cout << "OK 已连接 role=" << (cfg.role == PubSubRole::Publisher ? "publisher" : (cfg.role == PubSubRole::Subscriber ? "subscriber" : "both"))
+                      << " address=" << cfg.address
+                      << " pubId=" << cfg.publisherId
+                      << " wrId=" << cfg.writerId
+                      << " rdId=" << cfg.readerId
+                      << " interval=" << cfg.publishIntervalMs
+                      << " field=" << cfg.fieldName << std::endl;
             continue;
         }
 

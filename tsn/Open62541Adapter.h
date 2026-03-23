@@ -6,20 +6,30 @@
 #include <string>
 #include <thread>
 
-#include <open62541/client.h>
+#include <open62541/server.h>
+#include <open62541/server_config_default.h>
+#include <open62541/plugin/log_stdout.h>
+#include <open62541/networkmessage.h>
 
-struct Open62541RuntimeConfig {
-    // OPC UA 服务器地址
-    std::string endpoint = "opc.tcp://127.0.0.1:4840";
-    // 上行写入节点（字符串 NodeId）
-    uint16_t txNs = 2;
-    std::string txId = "TsnTx";
-    // 下行订阅节点（字符串 NodeId）
-    uint16_t rxNs = 2;
-    std::string rxId = "TsnRx";
+// 运行角色：发布者 / 订阅者 / 双角色。
+enum class PubSubRole { Publisher, Subscriber, Both };
+
+struct PubSubConfig {
+    // 角色：缺省 Both。
+    PubSubRole role = PubSubRole::Both;
+    // 传输地址（UADP over UDP），如 opc.udp://224.0.0.22:4840 或 opc.udp://239.0.0.1:4840。
+    std::string address = "opc.udp://224.0.0.22:4840";
+    // PublisherId / WriterId / ReaderId。
+    uint16_t publisherId = 1001;
+    uint16_t writerId = 62541;
+    uint16_t readerId = 7001;
+    // 发布周期（ms）。
+    uint32_t publishIntervalMs = 100;
+    // 数据集字段名，单字段字符串。
+    std::string fieldName = "tsnPayload";
 };
 
-// open62541 适配器：封装 TSN 消息发送与订阅接口（真实 UA 客户端实现）。
+// open62541 PubSub 适配器（UDP，单字符串字段）。
 class Open62541Adapter {
 public:
     Open62541Adapter();
@@ -28,42 +38,43 @@ public:
     bool start();
     void stop();
 
-    // 运行时配置（可在运行中调用，将触发重连）。
-    bool configure(const Open62541RuntimeConfig &cfg);
-    // 可选：手工启停连接（UnixSocket/NamedPipe 默认不连，收到 CFG 后才连）。
+    // 运行时配置（触发重建 PubSub 配置）。
+    bool configure(const PubSubConfig &cfg);
+    // 开关：允许/停止 PubSub 运行。
     void setConnectEnabled(bool enabled);
 
-    // 上行：UnixSocket -> TSN（写入 tx 节点）。
+    // 发布：将 payload 写入数据集（仅当角色包含 Publisher）。
     bool send(const std::string &payload);
 
-    // 下行：TSN -> UnixSocket（订阅 rx 节点并回调）。
+    // 订阅：注册下行回调（仅当角色包含 Subscriber）。
     void subscribe(std::function<void(const std::string &)> onMsg);
 
 private:
-    // UA 订阅回调：收到数据变更时触发。
-    static void dataChangeCallback(UA_Client *client,
-                                   UA_UInt32 subId,
-                                   void *subContext,
-                                   UA_UInt32 monId,
-                                   void *monContext,
-                                   UA_DataValue *value);
-    // 连接并创建订阅（内部加锁版本）。
-    bool connectAndSubscribeLocked();
-    // 断开连接并释放资源（内部加锁版本）。
-    void disconnectLocked();
-    // 后台循环：run_iterate + 重连逻辑。
+    bool setupPubSubLocked();
+    void teardownLocked();
     void loop();
+
+    // Subscriber 回调。
+    static void readerDataSetListener(UA_Server *server, UA_UInt32 readerId,
+                                      void *readerContext, const UA_ByteString *msg,
+                                      const UA_NetworkMessage *nm);
 
 private:
     std::atomic<bool> running_{false};
     std::atomic<bool> reconfigureRequested_{false};
     std::atomic<bool> connectEnabled_{false};
-    std::thread clientLoopThread_;
+    std::thread serverThread_;
 
     std::mutex mu_;
-    Open62541RuntimeConfig cfg_;
+    PubSubConfig cfg_{};
     std::function<void(const std::string &)> onMsg_;
 
-    struct UA_Client *client_{nullptr};
-    uint32_t subId_{0};
+    UA_Server *server_{nullptr};
+    UA_NodeId publishedDataSet_{UA_NODEID_NULL};
+    UA_NodeId writerGroup_{UA_NODEID_NULL};
+    UA_NodeId dataSetWriter_{UA_NODEID_NULL};
+    UA_NodeId connection_{UA_NODEID_NULL};
+    UA_NodeId readerGroup_{UA_NODEID_NULL};
+    UA_NodeId dataSetReader_{UA_NODEID_NULL};
+    UA_NodeId payloadVar_{UA_NODEID_NULL};
 };

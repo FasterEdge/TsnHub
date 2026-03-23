@@ -87,6 +87,22 @@ BOOL WINAPI consoleHandler(DWORD) {
         }
         return true;
     }
+
+    // PubSub 参数（UDP UADP）。
+    std::string roleStr = "both"; // publisher|subscriber|both
+    std::string address = "opc.udp://224.0.0.22:4840";
+    uint16_t publisherId = 1001;
+    uint16_t writerId = 62541;
+    uint16_t readerId = 7001;
+    uint32_t pubInterval = 100;
+    std::string fieldName = "tsnPayload";
+
+    auto parseRole = [](const std::string &v) -> PubSubRole {
+        std::string l = toLower(v);
+        if (l == "publisher") return PubSubRole::Publisher;
+        if (l == "subscriber") return PubSubRole::Subscriber;
+        return PubSubRole::Both;
+    };
 }
 
 int main(int argc, char **argv) {
@@ -116,12 +132,13 @@ int main(int argc, char **argv) {
     app.add_option("-a,--addr", addr, "Unix socket path or Windows named pipe name");
 
     // CommandLine 模式参数：通过 CLI 设置 UA 端点与节点（可选）。
-    std::string endpoint; // UA 服务器地址，例如 opc.tcp://
-    std::string tx;       // 上行节点 id，例如 2:TsnTx
-    std::string rx;       // 下行节点 id，例如 2:TsnRx
-    app.add_option("--endpoint", endpoint, "OPC UA endpoint for CommandLine mode (optional; use connect command if omitted)");
-    app.add_option("--tx", tx, "Tx node id in ns:id for CommandLine mode");
-    app.add_option("--rx", rx, "Rx node id in ns:id for CommandLine mode");
+    app.add_option("--role", roleStr, "PubSub role: publisher/subscriber/both (default both)");
+    app.add_option("--address", address, "UADP UDP address, e.g. opc.udp://239.0.0.1:4840");
+    app.add_option("--publisher-id", publisherId, "PublisherId (uint16)");
+    app.add_option("--writer-id", writerId, "WriterId (uint16)");
+    app.add_option("--reader-id", readerId, "ReaderId (uint16)");
+    app.add_option("--interval", pubInterval, "Publish interval ms");
+    app.add_option("--field", fieldName, "Single string field name");
 
     try {
         // 解析命令行参数，若有错误会抛出异常。
@@ -170,40 +187,36 @@ int main(int argc, char **argv) {
     std::signal(SIGTERM, onSignal);
 #endif
 
-    // 启动 open62541 适配层：负责 TSN 发送与订阅。
+    // 启动 open62541 适配层：负责 TSN 发送与订阅（PubSub）。
     Open62541Adapter tsnAdapter;
     if (!tsnAdapter.start()) {
         std::cerr << "启动 Open62541Adapter 失败" << std::endl;
         return 3;
     }
 
-    // CommandLine 模式：通过命令行参数配置 UA，并用 stdin/stdout 交互。
+    // CommandLine 模式：通过命令行参数配置 PubSub，并用 stdin/stdout 交互。
     if (isCommandLine) {
         CommandLineBridge bridge;
         bridge.bindAdapter(&tsnAdapter);
 
-        // 若提供了完整 endpoint/tx/rx，则预配置；否则等待 connect 指令。
-        if (!endpoint.empty() && !tx.empty() && !rx.empty()) {
-            Open62541RuntimeConfig cfg;
-            cfg.endpoint = endpoint;
+        // 若提供了完整参数，则预配置；否则等待 connect 指令。
+        if (!roleStr.empty() && !address.empty()) {
+            PubSubConfig cfg;
+            cfg.role = parseRole(roleStr);
+            cfg.address = address;
+            cfg.publisherId = publisherId;
+            cfg.writerId = writerId;
+            cfg.readerId = readerId;
+            cfg.publishIntervalMs = pubInterval;
+            cfg.fieldName = fieldName;
             std::string err;
-            if (!parseNsId(tx, cfg.txNs, cfg.txId, err)) {
-                std::cerr << err << std::endl;
-                tsnAdapter.stop();
-                return 6;
-            }
-            if (!parseNsId(rx, cfg.rxNs, cfg.rxId, err)) {
-                std::cerr << err << std::endl;
-                tsnAdapter.stop();
-                return 6;
-            }
             if (!bridge.configure(cfg, err)) {
                 std::cerr << err << std::endl;
                 tsnAdapter.stop();
                 return 6;
             }
         } else {
-            std::cout << "CommandLine 模式：未提供 endpoint/tx/rx，等待 connect 指令" << std::endl;
+            std::cout << "CommandLine 模式：未提供 PubSub 参数，等待 connect 指令" << std::endl;
         }
 
         bridge.run(&gStop);
@@ -215,52 +228,47 @@ int main(int argc, char **argv) {
 
     // 解析并应用运行时配置的回调（供 UnixSocket / NamedPipe 复用）。
     auto configHandler = [&tsnAdapter](const std::string &line, std::string &reply) {
-        // 解析配置行：CFG endpoint=... tx=ns:id rx=ns:id
-        // 示例：CFG endpoint=opc.tcp://127.0.0.1:4840 tx=2:TsnTx rx=2:TsnRx
-        Open62541RuntimeConfig cfg;
+        // 配置格式：CFG role=publisher address=opc.udp://239.0.0.1:4840 publisherId=1001 writerId=62541 readerId=7001 interval=100 field=name
+        PubSubConfig cfg;
         std::istringstream iss(line);
         std::string token;
         iss >> token; // CFG
         while (iss >> token) {
-            if (token.rfind("endpoint=", 0) == 0) {
-                cfg.endpoint = token.substr(std::strlen("endpoint="));
-            } else if (token.rfind("tx=", 0) == 0) {
-                std::string v = token.substr(3);
-                auto p = v.find(':');
-                if (p == std::string::npos) {
-                    reply = "ERR tx 格式应为 ns:id";
-                    return false;
-                }
-                cfg.txNs = static_cast<uint16_t>(std::stoi(v.substr(0, p)));
-                cfg.txId = v.substr(p + 1);
-            } else if (token.rfind("rx=", 0) == 0) {
-                std::string v = token.substr(3);
-                auto p = v.find(':');
-                if (p == std::string::npos) {
-                    reply = "ERR rx 格式应为 ns:id";
-                    return false;
-                }
-                cfg.rxNs = static_cast<uint16_t>(std::stoi(v.substr(0, p)));
-                cfg.rxId = v.substr(p + 1);
+            if (token.rfind("role=", 0) == 0) {
+                cfg.role = parseRole(token.substr(5));
+            } else if (token.rfind("address=", 0) == 0) {
+                cfg.address = token.substr(8);
+            } else if (token.rfind("publisherId=", 0) == 0) {
+                cfg.publisherId = static_cast<uint16_t>(std::stoi(token.substr(12)));
+            } else if (token.rfind("writerId=", 0) == 0) {
+                cfg.writerId = static_cast<uint16_t>(std::stoi(token.substr(9)));
+            } else if (token.rfind("readerId=", 0) == 0) {
+                cfg.readerId = static_cast<uint16_t>(std::stoi(token.substr(9)));
+            } else if (token.rfind("interval=", 0) == 0) {
+                cfg.publishIntervalMs = static_cast<uint32_t>(std::stoul(token.substr(9)));
+            } else if (token.rfind("field=", 0) == 0) {
+                cfg.fieldName = token.substr(6);
             }
         }
 
-        // 必要字段校验。
-        if (cfg.endpoint.empty() || cfg.txId.empty() || cfg.rxId.empty()) {
-            reply = "ERR 缺少必要参数 endpoint/tx/rx";
+        if (cfg.address.empty()) {
+            reply = "ERR 缺少 address";
             return false;
         }
 
-        // 应用配置（运行中会触发重连）。
         bool ok = tsnAdapter.configure(cfg);
         if (!ok) {
             reply = "ERR 配置应用失败";
             return false;
         }
 
-        reply = "OK endpoint=" + cfg.endpoint +
-                " tx=" + std::to_string(cfg.txNs) + ":" + cfg.txId +
-                " rx=" + std::to_string(cfg.rxNs) + ":" + cfg.rxId;
+        reply = "OK role=" + std::string(cfg.role == PubSubRole::Publisher ? "publisher" : (cfg.role == PubSubRole::Subscriber ? "subscriber" : "both")) +
+                " address=" + cfg.address +
+                " pubId=" + std::to_string(cfg.publisherId) +
+                " wrId=" + std::to_string(cfg.writerId) +
+                " rdId=" + std::to_string(cfg.readerId) +
+                " interval=" + std::to_string(cfg.publishIntervalMs) +
+                " field=" + cfg.fieldName;
         return true;
     };
 
