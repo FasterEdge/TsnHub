@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 4.1)
 
-project(TsnHub)
+project(TsnHub VERSION 1.0.20260826 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,6 +21,8 @@ target_include_directories(TsnHub
         PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+target_compile_definitions(TsnHub PRIVATE TSNHUB_VERSION="${PROJECT_VERSION}")
 
 # 链接库
 target_link_libraries(TsnHub
