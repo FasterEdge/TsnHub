@@ -8,6 +8,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(TSNHUB_BUILD_TESTS "Build TsnHub tests" ON)
 option(TSNHUB_USE_OPEN62541_PUBSUB "Use native open62541 PubSub when available" OFF)
+option(TSNHUB_ALLOW_NATIVE_PUBSUB_NON_LINUX "Allow native PubSub API validation outside Linux" OFF)
+if(TSNHUB_USE_OPEN62541_PUBSUB AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   NOT TSNHUB_ALLOW_NATIVE_PUBSUB_NON_LINUX)
+    message(FATAL_ERROR "Native open62541 PubSub mode is Linux-only")
+endif()
 
 find_package(CLI11 REQUIRED)
 find_package(open62541 REQUIRED)
@@ -25,7 +30,16 @@ add_executable(TsnHub main.cpp)
 target_compile_definitions(TsnHub PRIVATE TSNHUB_VERSION="${PROJECT_VERSION}")
 target_link_libraries(TsnHub PRIVATE tsnhub_core CLI11::CLI11 open62541::open62541)
 if(TSNHUB_USE_OPEN62541_PUBSUB)
+    target_sources(TsnHub PRIVATE pubsub/Open62541Bridge.cpp)
     target_compile_definitions(TsnHub PRIVATE TSNHUB_USE_OPEN62541_PUBSUB=1)
+    add_executable(tsnhub_pubsub_fixture docker/PubSubFixture.cpp)
+    target_link_libraries(tsnhub_pubsub_fixture PRIVATE CLI11::CLI11 open62541::open62541)
+    if(TSNHUB_BUILD_TESTS)
+        add_test(NAME native_pubsub_integration
+            COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tests/native_pubsub_integration.sh
+                    ${CMAKE_CURRENT_BINARY_DIR})
+        set_tests_properties(native_pubsub_integration PROPERTIES TIMEOUT 30)
+    endif()
 endif()
 
 if(TSNHUB_BUILD_TESTS)

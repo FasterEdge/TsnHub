@@ -1,4 +1,7 @@
 #include "tsn/SimulatorNode.hpp"
+#ifdef TSNHUB_USE_OPEN62541_PUBSUB
+#include "pubsub/Open62541Bridge.hpp"
+#endif
 
 #include <CLI/CLI.hpp>
 #include <open62541/config.h>
@@ -41,8 +44,18 @@ tsnhub::GateSlot parseGate(const std::string &value) {
 
 int main(int argc, char **argv) {
     CLI::App app{"Cross-platform local TSN simulation hub"};
+    std::string mode{"portable"};
     std::string input{"127.0.0.1:4841"};
     std::string output{"127.0.0.1:4842"};
+    std::string subscribeUrl{"opc.udp://0.0.0.0:4841"};
+    std::string publishUrl{"opc.udp://127.0.0.1:4842"};
+    std::uint16_t inputPublisherId = 1;
+    std::uint16_t inputWriterGroupId = 1;
+    std::uint16_t inputWriterId = 1;
+    std::uint16_t outputPublisherId = 2;
+    std::uint16_t outputWriterGroupId = 2;
+    std::uint16_t outputWriterId = 2;
+    double publishIntervalMs = 1.0;
     std::vector<std::string> gates;
     std::int64_t delayUs = 0;
     std::int64_t jitterUs = 0;
@@ -51,8 +64,18 @@ int main(int argc, char **argv) {
     std::uint64_t seed = 1;
     bool showCapabilities = false;
 
-    app.add_option("--listen", input, "Input UDP endpoint host:port");
-    app.add_option("--forward", output, "Output UDP endpoint host:port");
+    app.add_option("--mode", mode, "Transport mode: portable or native")->check(CLI::IsMember({"portable", "native"}));
+    app.add_option("--listen", input, "Portable input UDP endpoint host:port");
+    app.add_option("--forward", output, "Portable output UDP endpoint host:port");
+    app.add_option("--subscribe-url", subscribeUrl, "Native PubSub input URL");
+    app.add_option("--publish-url", publishUrl, "Native PubSub output URL");
+    app.add_option("--input-publisher-id", inputPublisherId, "Expected upstream PublisherId");
+    app.add_option("--input-writer-group-id", inputWriterGroupId, "Expected upstream WriterGroupId");
+    app.add_option("--input-writer-id", inputWriterId, "Expected upstream DataSetWriterId");
+    app.add_option("--output-publisher-id", outputPublisherId, "TsnHub output PublisherId");
+    app.add_option("--output-writer-group-id", outputWriterGroupId, "TsnHub output WriterGroupId");
+    app.add_option("--output-writer-id", outputWriterId, "TsnHub output DataSetWriterId");
+    app.add_option("--publish-interval-ms", publishIntervalMs, "Native PubSub publishing interval")->check(CLI::PositiveNumber);
     app.add_option("--gate", gates, "Gate slot duration_us:mask (repeatable, mask accepts 0xff)");
     app.add_option("--delay-us", delayUs, "Base forwarding delay in microseconds")->check(CLI::NonNegativeNumber);
     app.add_option("--jitter-us", jitterUs, "Symmetric delay jitter in microseconds")->check(CLI::NonNegativeNumber);
@@ -64,7 +87,7 @@ int main(int argc, char **argv) {
 
     if(showCapabilities) {
         std::cout << "open62541=" << UA_OPEN62541_VER_MAJOR << '.' << UA_OPEN62541_VER_MINOR << '.' << UA_OPEN62541_VER_PATCH << '\n';
-#ifdef UA_ENABLE_PUBSUB
+#if defined(UA_ENABLE_PUBSUB) && defined(TSNHUB_USE_OPEN62541_PUBSUB)
         std::cout << "native_pubsub=true\n";
 #else
         std::cout << "native_pubsub=false\n";
@@ -84,14 +107,38 @@ int main(int argc, char **argv) {
         scheduler.maxQueuePerClass = queueSize;
         scheduler.randomSeed = seed;
 
-        const auto listen = parseEndpoint(input);
-        const auto forward = parseEndpoint(output);
-        tsnhub::SimulatorNode node(scheduler, listen, forward);
         std::signal(SIGINT, stopHandler);
         std::signal(SIGTERM, stopHandler);
-        std::cout << "TsnHub listening on " << input << ", forwarding to " << output << '\n';
-        node.run(running);
-        const auto stats = node.stats();
+        tsnhub::SchedulerStats stats;
+        if(mode == "native") {
+#ifdef TSNHUB_USE_OPEN62541_PUBSUB
+            tsnhub::NativePubSubConfig native;
+            native.listenUrl = subscribeUrl;
+            native.publishUrl = publishUrl;
+            native.inputPublisherId = inputPublisherId;
+            native.inputWriterGroupId = inputWriterGroupId;
+            native.inputDataSetWriterId = inputWriterId;
+            native.outputPublisherId = outputPublisherId;
+            native.outputWriterGroupId = outputWriterGroupId;
+            native.outputDataSetWriterId = outputWriterId;
+            native.publishingIntervalMs = publishIntervalMs;
+            tsnhub::Open62541Bridge node(native, scheduler);
+            std::cout << "TsnHub native PubSub subscribing " << subscribeUrl
+                      << ", publishing " << publishUrl << '\n';
+            node.run(running);
+            stats = node.stats();
+#else
+            throw std::runtime_error("native PubSub is not enabled in this build");
+#endif
+        } else {
+            const auto listen = parseEndpoint(input);
+            const auto forward = parseEndpoint(output);
+            tsnhub::SimulatorNode node(scheduler, listen, forward);
+            std::cout << "TsnHub portable mode listening on " << input
+                      << ", forwarding to " << output << '\n';
+            node.run(running);
+            stats = node.stats();
+        }
         std::cout << "accepted=" << stats.accepted << " released=" << stats.released
                   << " dropped_loss=" << stats.droppedByLoss
                   << " dropped_queue=" << stats.droppedByQueue << '\n';

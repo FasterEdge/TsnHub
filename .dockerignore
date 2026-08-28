@@ -1,0 +1,8 @@
+.git
+.idea
+.vscode
+build
+build-*
+cmake-build-*
+.DS_Store
+*.log

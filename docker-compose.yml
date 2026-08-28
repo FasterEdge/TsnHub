@@ -1,0 +1,74 @@
+services:
+  publisher:
+    build:
+      context: .
+      target: build
+    command:
+      - /build/tsnhub/tsnhub_pubsub_fixture
+      - publisher
+      - --url
+      - opc.udp://tsnhub:4841
+      - --publisher-id
+      - "1"
+      - --writer-group-id
+      - "1"
+      - --writer-id
+      - "1"
+      - --count
+      - "20"
+    depends_on:
+      tsnhub:
+        condition: service_started
+    networks: [tsn]
+
+  tsnhub:
+    build:
+      context: .
+      target: runtime
+    command:
+      - --mode
+      - native
+      - --subscribe-url
+      - opc.udp://0.0.0.0:4841
+      - --publish-url
+      - opc.udp://subscriber:4842
+      - --input-publisher-id
+      - "1"
+      - --input-writer-group-id
+      - "1"
+      - --input-writer-id
+      - "1"
+      - --output-publisher-id
+      - "2"
+      - --output-writer-group-id
+      - "2"
+      - --output-writer-id
+      - "2"
+      - --delay-us
+      - "200"
+      - --gate
+      - 1000:0xff
+    networks: [tsn]
+
+  subscriber:
+    build:
+      context: .
+      target: build
+    command:
+      - /build/tsnhub/tsnhub_pubsub_fixture
+      - subscriber
+      - --url
+      - opc.udp://0.0.0.0:4842
+      - --publisher-id
+      - "2"
+      - --writer-group-id
+      - "2"
+      - --writer-id
+      - "2"
+      - --expect
+      - "20"
+    networks: [tsn]
+
+networks:
+  tsn:
+    driver: bridge
