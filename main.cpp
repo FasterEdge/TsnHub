@@ -1,3 +1,4 @@
+// FasterEdge 开源项目 · https://github.com/FasterEdge · https://gitee.com/FasterEdge
 #include "tsn/SimulatorNode.hpp"
 #ifdef TSNHUB_USE_OPEN62541_PUBSUB
 #include "pubsub/Open62541Bridge.hpp"
