@@ -1,3 +1,4 @@
+// FasterEdge 开源项目 - Github: https://github.com/FasterEdge - Gitee: https://gitee.com/FasterEdge
 #include "pubsub/Open62541Bridge.hpp"
 
 #include <open62541/server.h>

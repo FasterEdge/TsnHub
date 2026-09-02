@@ -1,3 +1,4 @@
+# FasterEdge 开源项目 - Github: https://github.com/FasterEdge - Gitee: https://gitee.com/FasterEdge
 # This file is managed by Conan, contents will be overwritten.
 # To keep your changes, remove these comment lines, but the plugin won't be able to modify your requirements
 
