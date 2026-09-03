@@ -124,8 +124,10 @@ int main(int argc, char **argv) {
             native.outputDataSetWriterId = outputWriterId;
             native.publishingIntervalMs = publishIntervalMs;
             tsnhub::Open62541Bridge node(native, scheduler);
+            // 容器/管道场景下 stdout 为全缓冲, 必须用 endl 立即冲刷,
+            // 否则长驻循环的启动消息永远不进 docker logs。
             std::cout << "TsnHub native PubSub subscribing " << subscribeUrl
-                      << ", publishing " << publishUrl << '\n';
+                      << ", publishing " << publishUrl << std::endl;
             node.run(running);
             stats = node.stats();
 #else
@@ -136,13 +138,13 @@ int main(int argc, char **argv) {
             const auto forward = parseEndpoint(output);
             tsnhub::SimulatorNode node(scheduler, listen, forward);
             std::cout << "TsnHub portable mode listening on " << input
-                      << ", forwarding to " << output << '\n';
+                      << ", forwarding to " << output << std::endl;
             node.run(running);
             stats = node.stats();
         }
         std::cout << "accepted=" << stats.accepted << " released=" << stats.released
                   << " dropped_loss=" << stats.droppedByLoss
-                  << " dropped_queue=" << stats.droppedByQueue << '\n';
+                  << " dropped_queue=" << stats.droppedByQueue << std::endl;
         return 0;
     } catch(const std::exception &error) {
         std::cerr << "TsnHub: " << error.what() << '\n';
