@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*'          # 打 v0.1.0 等标签时自动构建并产出镜像
+permissions:
+  contents: read
+
 jobs:
   docker-build:
     runs-on: ubuntu-latest
