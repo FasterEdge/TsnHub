@@ -1,7 +1,10 @@
 name: 'Docker 镜像构建'
 on:
   workflow_dispatch:
+  pull_request:
   push:
+    branches:
+      - main
     tags:
       - 'v*'          # 打 v0.1.0 等标签时自动构建并产出镜像
 permissions:
