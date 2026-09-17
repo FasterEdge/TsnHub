@@ -2,6 +2,7 @@
 #include "transport/UdpSocket.hpp"
 
 #include <array>
+#include <cerrno>
 #include <cstring>
 #include <stdexcept>
 
@@ -97,17 +98,26 @@ void UdpSocket::sendTo(const UdpEndpoint &endpoint, const std::vector<std::uint8
 }
 std::optional<std::vector<std::uint8_t>> UdpSocket::receive(std::size_t maxBytes,
                                                             std::chrono::milliseconds timeout) const {
+    const SystemSocket fd = systemSocket(socket_);
+#ifndef _WIN32
+    // POSIX select 的 FD_SET 要求 fd < FD_SETSIZE, 否则是 fd_set 位图越界写(UB)
+    if (fd < 0 || fd >= FD_SETSIZE)
+        throw std::runtime_error("UDP socket fd out of select range");
+#endif
     fd_set readSet;
     FD_ZERO(&readSet);
-    FD_SET(systemSocket(socket_), &readSet);
+    FD_SET(fd, &readSet);
     timeval value{};
     value.tv_sec = static_cast<long>(timeout.count() / 1000);
     value.tv_usec = static_cast<long>((timeout.count() % 1000) * 1000);
+    int ready;
+    do {
 #ifdef _WIN32
-    const auto ready = select(0, &readSet, nullptr, nullptr, &value);
+        ready = select(0, &readSet, nullptr, nullptr, &value);
 #else
-    const auto ready = select(systemSocket(socket_) + 1, &readSet, nullptr, nullptr, &value);
+        ready = select(fd + 1, &readSet, nullptr, nullptr, &value);
 #endif
+    } while (ready < 0 && errno == EINTR);   // 信号中断重试, 而非当作失败抛出
     if(ready == 0) return std::nullopt;
     if(ready < 0) throw std::runtime_error("UDP receive select failed");
     std::vector<std::uint8_t> payload(maxBytes);
