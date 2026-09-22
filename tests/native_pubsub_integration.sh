@@ -15,6 +15,14 @@ mkdir -p "$TMP"
 HUB_PID=""
 SUB_PID=""
 cleanup() {
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "Native PubSub integration failed with exit status $status; process logs:"
+    for log in publisher.log subscriber.log hub.log; do
+      echo "--- $log ---"
+      cat "$TMP/$log" 2>/dev/null || true
+    done
+  fi
   [ -z "$HUB_PID" ] || kill -TERM "$HUB_PID" 2>/dev/null || true
   [ -z "$SUB_PID" ] || kill -TERM "$SUB_PID" 2>/dev/null || true
   wait 2>/dev/null || true
