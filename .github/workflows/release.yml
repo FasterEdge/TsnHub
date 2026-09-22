@@ -1,0 +1,85 @@
+name: 'Release 打包'
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建并上传的版本标签，例如 v1.0.20260920；留空则只构建不上传'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published, released]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: 'tsnhub-release-${{ github.workflow }}-${{ github.ref }}'
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: '打包 Docker 镜像并发布 Release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: '校验版本号与发布标签一致'
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^project(TsnHub VERSION \([^ ]*\).*/\1/p' CMakeLists.txt)"
+          tag="${INPUT_TAG:-}"
+          [ -n "$tag" ] || tag="${RELEASE_TAG:-$REF_NAME}"
+          echo "源码版本号: v${version}"
+          echo "发布标签:   ${tag:-<未指定>}"
+          if [ -z "${tag}" ] || [ "${tag}" = "main" ] || [ "${tag}" = "master" ]; then
+            echo '未指定发布标签，跳过一致性校验。'
+            exit 0
+          fi
+          if [ "${tag}" != "v${version}" ]; then
+            echo "::error::发布标签 ${tag} 与源码版本号 v${version} 不一致，请先把版本号改成 ${tag#v} 再发布。"
+            exit 1
+          fi
+
+      - name: '构建 Docker 镜像'
+        run: docker build -t tsnhub .
+
+      - name: '导出镜像包'
+        run: |
+          mkdir -p release
+          docker save tsnhub | gzip > release/tsnhub-image.tar.gz
+
+      - name: '生成 MD5/SHA1 校验文件'
+        run: |
+          set -euo pipefail
+          cd release
+          md5sum tsnhub-image.tar.gz > checksums-md5.txt
+          sha1sum tsnhub-image.tar.gz > checksums-sha1.txt
+
+      - name: '上传到 Release'
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.event.release.tag_name || github.ref_name }}
+          name: 'TsnHub v${{ github.event.inputs.tag || github.event.release.tag_name || github.ref_name }}'
+          body: |
+            ## TsnHub v${{ github.event.inputs.tag || github.event.release.tag_name || github.ref_name }}
+
+            ### Docker 镜像包
+            - `tsnhub-image.tar.gz`：`docker load -i tsnhub-image.tar.gz` 导入后即可使用。
+
+            Dockerfile 内已内置 open62541 1.5 编译与 ctest 测试，镜像自带 `TsnHub` 可执行文件。
+          files: |
+            release/tsnhub-image.tar.gz
+            release/checksums-md5.txt
+            release/checksums-sha1.txt
+          fail_on_unmatched_files: true

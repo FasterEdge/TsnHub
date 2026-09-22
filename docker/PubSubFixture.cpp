@@ -46,9 +46,11 @@ UA_NodeId addConnection(UA_Server *server, const std::string &url, UA_UInt16 pub
     requireGood(UA_Server_addPubSubConnection(server, &config, &id), "add connection");
     return id;
 }
-void configurePublisher(UA_Server *server, const std::string &url, UA_NodeId variable,
-                        UA_UInt16 publisherId, UA_UInt16 groupId, UA_UInt16 writerId) {
-    const auto connection = addConnection(server, url, publisherId);
+UA_NodeId configurePublisher(UA_Server *server, const std::string &bindUrl,
+                             const std::string &sendUrl, UA_NodeId variable,
+                             UA_UInt16 publisherId, UA_UInt16 groupId,
+                             UA_UInt16 writerId) {
+    const auto connection = addConnection(server, bindUrl, publisherId);
     UA_PublishedDataSetConfig pds{};
     pds.publishedDataSetType = UA_PUBSUB_DATASET_PUBLISHEDITEMS;
     pds.name = UA_STRING(const_cast<char *>("fixture data"));
@@ -72,6 +74,19 @@ void configurePublisher(UA_Server *server, const std::string &url, UA_NodeId var
         UA_UADPNETWORKMESSAGECONTENTMASK_WRITERGROUPID | UA_UADPNETWORKMESSAGECONTENTMASK_PAYLOADHEADER);
     UA_ExtensionObject_setValueNoDelete(&group.messageSettings, &message,
         &UA_TYPES[UA_TYPES_UADPWRITERGROUPMESSAGEDATATYPE]);
+    UA_NetworkAddressUrlDataType sendAddress{UA_STRING_NULL,
+        UA_STRING(const_cast<char *>(sendUrl.c_str()))};
+    UA_DatagramWriterGroupTransport2DataType udpTransport;
+    UA_DatagramWriterGroupTransport2DataType_init(&udpTransport);
+    udpTransport.address.encoding = UA_EXTENSIONOBJECT_DECODED;
+    udpTransport.address.content.decoded.type = &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE];
+    udpTransport.address.content.decoded.data = &sendAddress;
+    UA_ExtensionObject transportSettings;
+    std::memset(&transportSettings, 0, sizeof(transportSettings));
+    transportSettings.encoding = UA_EXTENSIONOBJECT_DECODED;
+    transportSettings.content.decoded.type = &UA_TYPES[UA_TYPES_DATAGRAMWRITERGROUPTRANSPORT2DATATYPE];
+    transportSettings.content.decoded.data = &udpTransport;
+    group.transportSettings = transportSettings;
     UA_NodeId groupNode;
     requireGood(UA_Server_addWriterGroup(server, connection, &group, &groupNode), "add writer group");
     UA_DataSetWriterConfig writer{};
@@ -79,6 +94,7 @@ void configurePublisher(UA_Server *server, const std::string &url, UA_NodeId var
     writer.dataSetWriterId = writerId;
     writer.keyFrameCount = 1;
     requireGood(UA_Server_addDataSetWriter(server, groupNode, pdsId, &writer, nullptr), "add writer");
+    return groupNode;
 }
 void configureSubscriber(UA_Server *server, const std::string &url, UA_NodeId variable,
                          UA_UInt16 publisherId, UA_UInt16 groupId, UA_UInt16 writerId) {
@@ -118,10 +134,12 @@ int main(int argc, char **argv) {
     CLI::App app{"TsnHub native PubSub integration fixture"};
     std::string role;
     std::string url;
+    std::string bindUrl;
     std::uint16_t publisherId = 1, groupId = 1, writerId = 1;
     int count = 20, expect = 20;
     app.add_option("role", role)->required()->check(CLI::IsMember({"publisher", "subscriber"}));
     app.add_option("--url", url)->required();
+    app.add_option("--bind-url", bindUrl, "Local UDP bind URL for publisher (default: ephemeral wildcard)");
     app.add_option("--publisher-id", publisherId);
     app.add_option("--writer-group-id", groupId);
     app.add_option("--writer-id", writerId);
@@ -138,23 +156,40 @@ int main(int argc, char **argv) {
             throw std::runtime_error("server allocation failed");
         }
         const auto variable = addVariable(server, 6001, "FixtureValue");
-        if(role == "publisher") configurePublisher(server, url, variable, publisherId, groupId, writerId);
+        UA_NodeId writerGroup;
+        UA_NodeId_init(&writerGroup);
+        if(role == "publisher") {
+            const auto bind = bindUrl.empty() ? std::string("opc.udp://0.0.0.0:0") : bindUrl;
+            writerGroup = configurePublisher(server, bind, url, variable,
+                                             publisherId, groupId, writerId);
+        }
         else configureSubscriber(server, url, variable, publisherId, groupId, writerId);
         requireGood(UA_Server_enableAllPubSubComponents(server), "enable PubSub");
         requireGood(UA_Server_run_startup(server), "startup");
+        if(role == "publisher") {
+            // open62541's publish callback samples the current variable value,
+            // so a write issued before the WriterGroup becomes operational can
+            // be superseded before the first network message is built. Iterate
+            // until the group is ready so the first fixture value is actually
+            // sent instead of dropped by the startup window.
+            UA_PubSubState state = UA_PUBSUBSTATE_PAUSED;
+            const auto ready = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+            while(state != UA_PUBSUBSTATE_OPERATIONAL &&
+                  std::chrono::steady_clock::now() < ready) {
+                UA_Server_run_iterate(server, false);
+                requireGood(UA_Server_getWriterGroupState(server, writerGroup, &state),
+                            "writer group state");
+                if(state != UA_PUBSUBSTATE_OPERATIONAL)
+                    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+            }
+            if(state != UA_PUBSUBSTATE_OPERATIONAL)
+                throw std::runtime_error("writer group did not become operational");
+        }
         int last = 0;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{20};
         while(std::chrono::steady_clock::now() < deadline) {
-            if(role == "publisher" && last < count) {
-                ++last;
-                UA_Int32 value = last;
-                UA_Variant variant;
-                UA_Variant_init(&variant);
-                UA_Variant_setScalar(&variant, &value, &UA_TYPES[UA_TYPES_INT32]);
-                requireGood(UA_Server_writeValue(server, variable, variant), "write fixture value");
-            }
-            UA_Server_run_iterate(server, false);
             if(role == "subscriber") {
+                UA_Server_run_iterate(server, false);
                 UA_Variant value;
                 UA_Variant_init(&value);
                 if(UA_Server_readValue(server, variable, &value) == UA_STATUSCODE_GOOD &&
@@ -163,11 +198,44 @@ int main(int argc, char **argv) {
                 }
                 UA_Variant_clear(&value);
                 if(last >= expect) break;
-            } else if(last >= count) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{10});
+                continue;
+            }
+
+            if(last < count) {
+                ++last;
+                UA_Int32 value = last;
+                UA_Variant variant;
+                UA_Variant_init(&variant);
+                UA_Variant_setScalar(&variant, &value, &UA_TYPES[UA_TYPES_INT32]);
+                // Wait for one publish cycle so the just-written value is
+                // actually sent before the next value replaces it. open62541's
+                // publish callback samples the current variable value, so a
+                // new write can otherwise erase a frame that was not yet sent.
+                UA_DateTime previousPublish = 0;
+                requireGood(UA_Server_getWriterGroupLastPublishTimestamp(
+                                server, writerGroup, &previousPublish),
+                            "writer group last publish");
+                requireGood(UA_Server_writeValue(server, variable, variant), "write fixture value");
+                const auto publishDeadline = std::chrono::steady_clock::now() +
+                                             std::chrono::seconds{1};
+                while(std::chrono::steady_clock::now() < publishDeadline) {
+                    UA_Server_run_iterate(server, false);
+                    UA_DateTime currentPublish = 0;
+                    const UA_StatusCode status =
+                        UA_Server_getWriterGroupLastPublishTimestamp(
+                            server, writerGroup, &currentPublish);
+                    if(status == UA_STATUSCODE_GOOD &&
+                       currentPublish != previousPublish)
+                        break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                }
+                if(std::chrono::steady_clock::now() >= publishDeadline)
+                    throw std::runtime_error("fixture publish timed out");
+            } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds{250});
                 break;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds{10});
         }
         UA_Server_run_shutdown(server);
         UA_Server_delete(server);

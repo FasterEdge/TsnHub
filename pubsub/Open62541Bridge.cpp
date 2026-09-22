@@ -24,7 +24,8 @@ void requireGood(UA_StatusCode status, const char *operation) {
         throw std::runtime_error(std::string(operation) + ": " + UA_StatusCode_name(status));
 }
 
-UA_NodeId addInt32Variable(UA_Server *server, UA_UInt32 numericId, const char *name) {
+UA_NodeId addInt32Variable(UA_Server *server, UA_UInt32 numericId, const char *name,
+                           void *nodeContext) {
     UA_VariableAttributes attributes = UA_VariableAttributes_default;
     attributes.displayName = UA_LOCALIZEDTEXT(const_cast<char *>("en-US"), const_cast<char *>(name));
     attributes.dataType = UA_TYPES[UA_TYPES_INT32].typeId;
@@ -37,7 +38,7 @@ UA_NodeId addInt32Variable(UA_Server *server, UA_UInt32 numericId, const char *n
         UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER),
         UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES),
         UA_QUALIFIEDNAME(namespaceIndex, const_cast<char *>(name)),
-        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE), attributes, nullptr, &created),
+        UA_NODEID_NUMERIC(0, UA_NS0ID_BASEDATAVARIABLETYPE), attributes, nodeContext, &created),
         "add variable");
     return created;
 }
@@ -66,8 +67,6 @@ struct Open62541Bridge::Impl {
     UA_Server *server{};
     UA_NodeId inputNode{};
     UA_NodeId outputNode{};
-    UA_Int32 lastInput{};
-    bool hasInput{};
     std::uint64_t sequence{};
 
     Impl(NativePubSubConfig cfg, SchedulerConfig schedulerConfig)
@@ -80,9 +79,22 @@ struct Open62541Bridge::Impl {
             UA_ServerConfig_clear(&serverConfig);
             throw std::runtime_error("UA_Server_newWithConfig failed");
         }
-        inputNode = addInt32Variable(server, inputNodeNumericId, "TsnHubInput");
-        outputNode = addInt32Variable(server, outputNodeNumericId, "TsnHubOutput");
+        inputNode = addInt32Variable(server, inputNodeNumericId, "TsnHubInput", this);
+        outputNode = addInt32Variable(server, outputNodeNumericId, "TsnHubOutput", nullptr);
         configureSubscriber();
+        {
+            // DataSetReader writes each inbound field through the regular
+            // Write service. Registering an onWrite notification lets the
+            // bridge react to actual PubSub frames instead of polling a
+            // variable whose server timestamp changes on every read.
+            UA_ValueSourceNotifications notifications;
+            std::memset(&notifications, 0, sizeof(notifications));
+            notifications.onWrite = &Impl::handleInputWrite;
+            requireGood(
+                UA_Server_setVariableNode_internalValueSource(
+                    server, inputNode, nullptr, &notifications),
+                "register input value callback");
+        }
         configurePublisher();
         requireGood(UA_Server_enableAllPubSubComponents(server), "enable PubSub components");
     }
@@ -142,7 +154,14 @@ struct Open62541Bridge::Impl {
     }
 
     void configurePublisher() {
-        const UA_NodeId connection = addConnection(server, "TsnHub output", config.publishUrl,
+        // open62541 treats the PubSubConnection URL as the local bind address.
+        // Remote unicast destinations must live in the WriterGroup
+        // transportSettings, otherwise a remote hostname cannot be bound.
+        // Bind to an ephemeral local port: the send socket is opened from the
+        // WriterGroup transportSettings, and a wildcard bind cannot collide
+        // with a subscriber listening on the same port on the same host.
+        const UA_NodeId connection = addConnection(server, "TsnHub output",
+                                                    "opc.udp://0.0.0.0:0",
                                                     config.outputPublisherId);
         UA_PublishedDataSetConfig dataSetConfig;
         std::memset(&dataSetConfig, 0, sizeof(dataSetConfig));
@@ -177,6 +196,19 @@ struct Open62541Bridge::Impl {
             UA_UADPNETWORKMESSAGECONTENTMASK_PAYLOADHEADER);
         UA_ExtensionObject_setValueNoDelete(&writerGroupConfig.messageSettings, &message,
             &UA_TYPES[UA_TYPES_UADPWRITERGROUPMESSAGEDATATYPE]);
+        UA_NetworkAddressUrlDataType outputAddress{UA_STRING_NULL,
+            UA_STRING(const_cast<char *>(config.publishUrl.c_str()))};
+        UA_DatagramWriterGroupTransport2DataType udpTransport;
+        UA_DatagramWriterGroupTransport2DataType_init(&udpTransport);
+        udpTransport.address.encoding = UA_EXTENSIONOBJECT_DECODED;
+        udpTransport.address.content.decoded.type = &UA_TYPES[UA_TYPES_NETWORKADDRESSURLDATATYPE];
+        udpTransport.address.content.decoded.data = &outputAddress;
+        UA_ExtensionObject transportSettings;
+        std::memset(&transportSettings, 0, sizeof(transportSettings));
+        transportSettings.encoding = UA_EXTENSIONOBJECT_DECODED;
+        transportSettings.content.decoded.type = &UA_TYPES[UA_TYPES_DATAGRAMWRITERGROUPTRANSPORT2DATATYPE];
+        transportSettings.content.decoded.data = &udpTransport;
+        writerGroupConfig.transportSettings = transportSettings;
         UA_NodeId writerGroup;
         UA_NodeId_init(&writerGroup);
         requireGood(UA_Server_addWriterGroup(server, connection, &writerGroupConfig, &writerGroup),
@@ -192,25 +224,21 @@ struct Open62541Bridge::Impl {
                     "add DataSetWriter");
     }
 
-    void pollInput() {
-        UA_Variant value;
-        UA_Variant_init(&value);
-        const UA_StatusCode status = UA_Server_readValue(server, inputNode, &value);
-        if(status == UA_STATUSCODE_GOOD && UA_Variant_hasScalarType(&value, &UA_TYPES[UA_TYPES_INT32])) {
-            const auto current = *static_cast<UA_Int32 *>(value.data);
-            if(!hasInput || current != lastInput) {
-                Frame frame;
-                frame.sequence = ++sequence;
-                frame.priority = 0;
-                frame.stream = "opcua.int32";
-                frame.payload.resize(sizeof(current));
-                std::memcpy(frame.payload.data(), &current, sizeof(current));
-                scheduler.enqueue(std::move(frame));
-                lastInput = current;
-                hasInput = true;
-            }
-        }
-        UA_Variant_clear(&value);
+    static void handleInputWrite(UA_Server *, const UA_NodeId *, void *,
+                                 const UA_NodeId *, void *nodeContext,
+                                 const UA_NumericRange *, const UA_DataValue *data) {
+        auto *impl = static_cast<Impl *>(nodeContext);
+        if(!data || !data->hasValue || UA_StatusCode_isBad(data->status) ||
+           !UA_Variant_hasScalarType(&data->value, &UA_TYPES[UA_TYPES_INT32]))
+            return;
+        const auto current = *static_cast<UA_Int32 *>(data->value.data);
+        Frame frame;
+        frame.sequence = ++impl->sequence;
+        frame.priority = 0;
+        frame.stream = "opcua.int32";
+        frame.payload.resize(sizeof(current));
+        std::memcpy(frame.payload.data(), &current, sizeof(current));
+        impl->scheduler.enqueue(std::move(frame));
     }
 
     void release() {
@@ -233,7 +261,6 @@ void Open62541Bridge::run(std::atomic_bool &running) {
     requireGood(UA_Server_run_startup(impl_->server), "server startup");
     while(running.load(std::memory_order_relaxed)) {
         UA_Server_run_iterate(impl_->server, false);
-        impl_->pollInput();
         impl_->release();
         std::this_thread::sleep_for(impl_->config.pollInterval);
     }

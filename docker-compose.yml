@@ -8,6 +8,8 @@ services:
       - publisher
       - --url
       - opc.udp://tsnhub:4841
+      - --bind-url
+      - opc.udp://0.0.0.0:0
       - --publisher-id
       - "1"
       - --writer-group-id

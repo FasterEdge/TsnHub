@@ -3,11 +3,17 @@ FROM debian:bookworm-slim AS build
 
 ARG OPEN62541_VERSION=v1.5.0
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential ca-certificates cmake git ninja-build python3 wget \
+    build-essential ca-certificates cmake ninja-build python3 tar wget \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-RUN git clone --depth 1 --branch ${OPEN62541_VERSION} https://github.com/open62541/open62541.git
+# 受限网络下 github.com 直连常被阻断，改用 codeload 源码包拉取并自动重试
+RUN wget -q --retry-connrefused --tries=5 --timeout=60 \
+      -O open62541.tar.gz \
+      "https://codeload.github.com/open62541/open62541/tar.gz/refs/tags/${OPEN62541_VERSION}" \
+    && mkdir open62541 \
+    && tar -xzf open62541.tar.gz -C open62541 --strip-components=1 \
+    && rm open62541.tar.gz
 RUN cmake -S open62541 -B /build/open62541 -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX=/opt/open62541 \
@@ -20,7 +26,12 @@ RUN cmake -S open62541 -B /build/open62541 -G Ninja \
     && cmake --build /build/open62541 --parallel \
     && cmake --install /build/open62541
 
-RUN git clone --depth 1 --branch v2.6.0 https://github.com/CLIUtils/CLI11.git
+RUN wget -q --retry-connrefused --tries=5 --timeout=60 \
+      -O CLI11.tar.gz \
+      "https://codeload.github.com/CLIUtils/CLI11/tar.gz/refs/tags/v2.6.0" \
+    && mkdir CLI11 \
+    && tar -xzf CLI11.tar.gz -C CLI11 --strip-components=1 \
+    && rm CLI11.tar.gz
 # 构建并安装 CLI11，生成 CLI11Config.cmake（find_package(CLI11) 需要）
 RUN cmake -S /src/CLI11 -B /build/CLI11 -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
