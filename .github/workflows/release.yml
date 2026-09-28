@@ -67,7 +67,7 @@ jobs:
 
       - name: '上传到 Release'
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.tag != ''
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.event.release.tag_name || github.ref_name }}
           name: 'TsnHub v${{ github.event.inputs.tag || github.event.release.tag_name || github.ref_name }}'
