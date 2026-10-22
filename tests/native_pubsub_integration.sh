@@ -10,6 +10,10 @@ BIN_DIR=${1:-.}
 BASE_PORT=${TSNHUB_TEST_BASE_PORT:-4851}
 INPUT_PORT=$BASE_PORT
 OUTPUT_PORT=$((BASE_PORT + 1))
+# open62541 >= 1.5.x rejects a UDP port-0 connection URL, so each publisher needs
+# an explicit non-zero local bind that stays clear of the two subscriber ports.
+HUB_BIND_PORT=$((BASE_PORT + 2))
+FIXTURE_BIND_PORT=$((BASE_PORT + 3))
 TMP=${TMPDIR:-/tmp}/tsnhub-native-$$
 mkdir -p "$TMP"
 HUB_PID=""
@@ -39,6 +43,7 @@ SUB_PID=$!
 "$BIN_DIR/TsnHub" --mode native \
   --subscribe-url "opc.udp://0.0.0.0:$INPUT_PORT" \
   --publish-url "opc.udp://127.0.0.1:$OUTPUT_PORT" \
+  --publisher-bind-url "opc.udp://0.0.0.0:$HUB_BIND_PORT" \
   --input-publisher-id 1 --input-writer-group-id 1 --input-writer-id 1 \
   --output-publisher-id 2 --output-writer-group-id 2 --output-writer-id 2 \
   --delay-us 200 >"$TMP/hub.log" 2>&1 &
@@ -47,6 +52,7 @@ HUB_PID=$!
 sleep 1
 "$BIN_DIR/tsnhub_pubsub_fixture" publisher \
   --url "opc.udp://127.0.0.1:$INPUT_PORT" \
+  --bind-url "opc.udp://0.0.0.0:$FIXTURE_BIND_PORT" \
   --publisher-id 1 --writer-group-id 1 --writer-id 1 --count 20 \
   >"$TMP/publisher.log" 2>&1
 wait "$SUB_PID"
