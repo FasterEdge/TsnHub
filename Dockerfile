@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 FROM debian:bookworm-slim AS build
 
-ARG OPEN62541_VERSION=v1.5.0
+ARG OPEN62541_VERSION=v1.5.9
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential ca-certificates cmake ninja-build python3 tar wget \
     && rm -rf /var/lib/apt/lists/*
@@ -28,7 +28,7 @@ RUN cmake -S open62541 -B /build/open62541 -G Ninja \
 
 RUN wget -q --retry-connrefused --tries=5 --timeout=60 \
       -O CLI11.tar.gz \
-      "https://codeload.github.com/CLIUtils/CLI11/tar.gz/refs/tags/v2.6.0" \
+      "https://codeload.github.com/CLIUtils/CLI11/tar.gz/refs/tags/v2.7.2" \
     && mkdir CLI11 \
     && tar -xzf CLI11.tar.gz -C CLI11 --strip-components=1 \
     && rm CLI11.tar.gz
