@@ -50,6 +50,7 @@ int main(int argc, char **argv) {
     std::string output{"127.0.0.1:4842"};
     std::string subscribeUrl{"opc.udp://0.0.0.0:4841"};
     std::string publishUrl{"opc.udp://127.0.0.1:4842"};
+    std::string publisherBindUrl{"opc.udp://0.0.0.0:4843"};
     std::uint16_t inputPublisherId = 1;
     std::uint16_t inputWriterGroupId = 1;
     std::uint16_t inputWriterId = 1;
@@ -70,6 +71,7 @@ int main(int argc, char **argv) {
     app.add_option("--forward", output, "Portable output UDP endpoint host:port");
     app.add_option("--subscribe-url", subscribeUrl, "Native PubSub input URL");
     app.add_option("--publish-url", publishUrl, "Native PubSub output URL");
+    app.add_option("--publisher-bind-url", publisherBindUrl, "Native PubSub publisher local bind URL");
     app.add_option("--input-publisher-id", inputPublisherId, "Expected upstream PublisherId");
     app.add_option("--input-writer-group-id", inputWriterGroupId, "Expected upstream WriterGroupId");
     app.add_option("--input-writer-id", inputWriterId, "Expected upstream DataSetWriterId");
@@ -116,6 +118,7 @@ int main(int argc, char **argv) {
             tsnhub::NativePubSubConfig native;
             native.listenUrl = subscribeUrl;
             native.publishUrl = publishUrl;
+            native.publisherBindUrl = publisherBindUrl;
             native.inputPublisherId = inputPublisherId;
             native.inputWriterGroupId = inputWriterGroupId;
             native.inputDataSetWriterId = inputWriterId;

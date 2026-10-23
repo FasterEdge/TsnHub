@@ -84,3 +84,5 @@ Desktop.ini
 *.7z
 
 main
+
+__pycache__/

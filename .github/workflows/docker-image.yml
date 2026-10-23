@@ -1,11 +1,16 @@
 name: 'Docker 镜像构建'
 on:
   workflow_dispatch:
+  pull_request:
   push:
+    branches:
+      - main
     tags:
       - 'v*'          # 打 v0.1.0 等标签时自动构建并产出镜像
+  release:
+    types: [published, released]
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   docker-build:
@@ -19,9 +24,21 @@ jobs:
     - name: '导出并上传镜像工件'
       run: |
         docker save tsnhub | gzip > tsnhub-image.tar.gz
+    # PR 的 ref_name 形如 15/merge,dependabot 分支名也含斜杠,
+    # 而 upload-artifact 的工件名不允许出现 /,这里统一替换为连字符。
+    - name: '计算工件名'
+      shell: bash
+      run: echo "ARTIFACT_NAME=tsnhub-docker-image-${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
     - uses: actions/upload-artifact@v7
       with:
-        name: 'tsnhub-docker-image-${{ github.ref_name }}'
+        name: ${{ env.ARTIFACT_NAME }}
         path: 'tsnhub-image.tar.gz'
         if-no-files-found: 'warn'
         retention-days: 14
+    - name: '上传镜像包到 Release'
+      if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.event.release.tag_name || github.ref_name }}
+        files: 'tsnhub-image.tar.gz'
+        fail_on_unmatched_files: false
