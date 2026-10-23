@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120   # 编译 open62541 + ctest，耗时较长
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: '构建 Docker 镜像'
       run: |
         docker build -t tsnhub .
