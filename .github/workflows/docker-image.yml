@@ -29,7 +29,7 @@ jobs:
     - name: '计算工件名'
       shell: bash
       run: echo "ARTIFACT_NAME=tsnhub-docker-image-${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v7
       with:
         name: ${{ env.ARTIFACT_NAME }}
         path: 'tsnhub-image.tar.gz'
