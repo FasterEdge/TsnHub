@@ -139,7 +139,7 @@ int main(int argc, char **argv) {
     int count = 20, expect = 20;
     app.add_option("role", role)->required()->check(CLI::IsMember({"publisher", "subscriber"}));
     app.add_option("--url", url)->required();
-    app.add_option("--bind-url", bindUrl, "Local UDP bind URL for publisher (default: ephemeral wildcard)");
+    app.add_option("--bind-url", bindUrl, "Local UDP bind URL for publisher (default: opc.udp://0.0.0.0:4844)");
     app.add_option("--publisher-id", publisherId);
     app.add_option("--writer-group-id", groupId);
     app.add_option("--writer-id", writerId);
@@ -159,7 +159,9 @@ int main(int argc, char **argv) {
         UA_NodeId writerGroup;
         UA_NodeId_init(&writerGroup);
         if(role == "publisher") {
-            const auto bind = bindUrl.empty() ? std::string("opc.udp://0.0.0.0:0") : bindUrl;
+            // open62541 >= 1.5.x rejects a UDP port-0 connection URL, so fall back
+            // to a fixed wildcard port instead of an OS-assigned ephemeral one.
+            const auto bind = bindUrl.empty() ? std::string("opc.udp://0.0.0.0:4844") : bindUrl;
             writerGroup = configurePublisher(server, bind, url, variable,
                                              publisherId, groupId, writerId);
         }
