@@ -9,7 +9,7 @@ services:
       - --url
       - opc.udp://tsnhub:4841
       - --bind-url
-      - opc.udp://0.0.0.0:0
+      - opc.udp://0.0.0.0:4843
       - --publisher-id
       - "1"
       - --writer-group-id

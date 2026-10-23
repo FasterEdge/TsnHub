@@ -157,11 +157,12 @@ struct Open62541Bridge::Impl {
         // open62541 treats the PubSubConnection URL as the local bind address.
         // Remote unicast destinations must live in the WriterGroup
         // transportSettings, otherwise a remote hostname cannot be bound.
-        // Bind to an ephemeral local port: the send socket is opened from the
-        // WriterGroup transportSettings, and a wildcard bind cannot collide
-        // with a subscriber listening on the same port on the same host.
+        // open62541 >= 1.5.x requires a non-zero UDP port, so the writer binds a
+        // fixed local port (config.publisherBindUrl) instead of an ephemeral one.
+        // Keep it distinct from listenUrl and from any co-located subscriber that
+        // binds the publish destination, otherwise the bind collides on one host.
         const UA_NodeId connection = addConnection(server, "TsnHub output",
-                                                    "opc.udp://0.0.0.0:0",
+                                                    config.publisherBindUrl.c_str(),
                                                     config.outputPublisherId);
         UA_PublishedDataSetConfig dataSetConfig;
         std::memset(&dataSetConfig, 0, sizeof(dataSetConfig));
