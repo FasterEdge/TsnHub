@@ -18,6 +18,14 @@ TMP=${TMPDIR:-/tmp}/tsnhub-native-$$
 mkdir -p "$TMP"
 HUB_PID=""
 SUB_PID=""
+# Windows/MSYS 下 `kill -TERM` 只做 TerminateProcess, 进程拿不到 SIGTERM,
+# 因此 hub 永远不会走到"打印统计再退出"的分支, 统计行必然缺失 (与实现无关,
+# 是平台信号投递差异)。检测到该类平台时改为给 hub 一个固定运行窗口
+# (--run-ms), 让它自行停止并落盘统计; Linux/macOS 仍走 SIGTERM 路径。
+HUB_WINDOW_MS=""
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*) HUB_WINDOW_MS=12000 ;;
+esac
 cleanup() {
   status=$?
   if [ "$status" -ne 0 ]; then
@@ -46,7 +54,7 @@ SUB_PID=$!
   --publisher-bind-url "opc.udp://0.0.0.0:$HUB_BIND_PORT" \
   --input-publisher-id 1 --input-writer-group-id 1 --input-writer-id 1 \
   --output-publisher-id 2 --output-writer-group-id 2 --output-writer-id 2 \
-  --delay-us 200 >"$TMP/hub.log" 2>&1 &
+  --delay-us 200 ${HUB_WINDOW_MS:+--run-ms "$HUB_WINDOW_MS"} >"$TMP/hub.log" 2>&1 &
 HUB_PID=$!
 
 sleep 1
@@ -57,8 +65,13 @@ sleep 1
   >"$TMP/publisher.log" 2>&1
 wait "$SUB_PID"
 SUB_PID=""
-kill -TERM "$HUB_PID"
-wait "$HUB_PID"
+if [ -n "$HUB_WINDOW_MS" ]; then
+  # 固定窗口到点后 hub 自行退出; 等它把统计刷出来。
+  wait "$HUB_PID" || true
+else
+  kill -TERM "$HUB_PID"
+  wait "$HUB_PID"
+fi
 HUB_PID=""
 
 grep -q 'publisher final_value=20' "$TMP/publisher.log"

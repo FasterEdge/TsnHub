@@ -235,7 +235,14 @@ struct Open62541Bridge::Impl {
         const auto current = *static_cast<UA_Int32 *>(data->value.data);
         Frame frame;
         frame.sequence = ++impl->sequence;
-        frame.priority = 0;
+        // 优先级来自 (PublisherId, WriterGroupId, DataSetWriterId) -> priority 映射。
+        // 早期版本这里硬编码 0，导致八级队列与 GCL 在原生模式下全部退化：
+        // 所有帧都挤在 0 号队列，--gate 的位掩码也只有 bit0 有意义。
+        // 映射未命中时退回 inputDefaultPriority，便于单 Writer 的部署保持可预期。
+        frame.priority = resolveStreamPriority(impl->config.priorityMap,
+                                               impl->config.inputPublisherId,
+                                               impl->config.inputWriterGroupId,
+                                               impl->config.inputDataSetWriterId);
         frame.stream = "opcua.int32";
         frame.payload.resize(sizeof(current));
         std::memcpy(frame.payload.data(), &current, sizeof(current));
@@ -268,5 +275,8 @@ void Open62541Bridge::run(std::atomic_bool &running) {
     UA_Server_run_shutdown(impl_->server);
 }
 SchedulerStats Open62541Bridge::stats() const { return impl_->scheduler.stats(); }
+std::array<PrioritySummary, LatencyStats::priorityCount> Open62541Bridge::latencySummaries() const {
+    return impl_->scheduler.latencySummaries();
+}
 
 } // namespace tsnhub

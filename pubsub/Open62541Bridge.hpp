@@ -1,6 +1,7 @@
 // FasterEdge 开源项目 - Github: https://github.com/FasterEdge - Gitee: https://gitee.com/FasterEdge
 #pragma once
 
+#include "tsn/PriorityMap.hpp"
 #include "tsn/Scheduler.hpp"
 
 #include <atomic>
@@ -27,6 +28,12 @@ struct NativePubSubConfig {
     std::uint16_t outputDataSetWriterId{2};
     double publishingIntervalMs{1.0};
     std::chrono::milliseconds pollInterval{1};
+    // PublisherId/WriterGroupId/DataSetWriterId -> priority 映射。空规则集表示
+    // 所有输入帧都落到 defaultPriority，等价于 Open62541Bridge 早期把 priority
+    // 硬编码为 0 的行为。
+    PriorityMap priorityMap;
+    // 未命中任何规则时使用的优先级，可通过 --input-default-priority 调整。
+    std::uint8_t inputDefaultPriority{0};
 };
 
 class Open62541Bridge {
@@ -38,6 +45,7 @@ public:
 
     void run(std::atomic_bool &running);
     SchedulerStats stats() const;
+    std::array<PrioritySummary, LatencyStats::priorityCount> latencySummaries() const;
 
 private:
     struct Impl;
