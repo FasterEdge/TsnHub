@@ -123,7 +123,8 @@ int main(int argc, char **argv) {
                    "Statistics output format: summary, table, csv or json")
         ->check(CLI::IsMember({"summary", "table", "csv", "json"}));
     app.add_option("--stats-file", statsFile,
-                   "Write statistics to this file instead of stdout (requires a non-summary format)");
+                   "Write statistics to this file instead of stdout (any --stats-format, "
+                   "including summary)");
     app.add_option("--run-ms", runMs,
                    "Stop after this many milliseconds (0 runs until SIGINT/SIGTERM)")
         ->check(CLI::NonNegativeNumber);

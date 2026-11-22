@@ -279,6 +279,14 @@ static void jsonReportCarriesNoteAndTotals() {
     TSNHUB_TEST_REQUIRE(text.find("\"shaped_deferrals\"") != std::string::npos);
     TSNHUB_TEST_REQUIRE_MESSAGE(text.find("\"credit_deferrals\"") != std::string::npos,
                                 "json must expose the credit-deferral counter");
+    // totals 里也必须带 credit_deferrals, 否则摘要行与 JSON 的总量口径不一致。
+    const auto totalsBegin = text.find("\"totals\"");
+    const auto prioritiesBegin = text.find("\"priorities\"");
+    TSNHUB_TEST_REQUIRE_MESSAGE(
+        totalsBegin != std::string::npos && prioritiesBegin != std::string::npos &&
+            totalsBegin < prioritiesBegin &&
+            text.find("\"credit_deferrals\"", totalsBegin) < prioritiesBegin,
+        "json totals must carry credit_deferrals");
 }
 
 // 表格输出按优先级从 0 到 7 排序, 便于肉眼核对。

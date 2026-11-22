@@ -8,7 +8,7 @@
 
 TsnHub 是 FasterEdge 生态中的 TSN 仿真组件。它在 OPC UA PubSub 数据的接收与重新发布之间加入用户态 TSN 调度器，用于在普通 Linux 主机或 Docker 环境中模拟时间敏感网络的队列、优先级、门控、时延、抖动、丢包与拥塞行为。
 
-上述每一项都可以被测量：时延与抖动按优先级输出 p50/p99/max（见「九、时延与拥塞测量」），拥塞由 `--shape-mbps` 令牌桶与 `--credit-frames-per-window` 窗口配额两级限速实现，丢包率随负载的变化可直接从统计 CSV 的 `offered`/`loss_rate` 两列画出。
+上述每一项都可以被测量：时延与抖动按优先级输出 p50/p99/max（见「九、时延与拥塞测量」），拥塞由 `--shape-mbps` 令牌桶与 `--credit-frames-per-window` 窗口配额两级限速实现。注意两个丢包口径的区别：`loss_rate = dropped_loss / offered` 只反映 `--loss` 指定的随机丢包（`tsn/Scheduler.cpp:69`，与负载无关），随负载增长的是 `drop_rate = (dropped_loss + dropped_queue) / offered`，因为 `dropped_queue` 来自队列容量溢出；画丢包-负载曲线应取 `offered` 为横轴、`drop_rate` 为纵轴。
 
 目标数据流：
 
@@ -62,7 +62,7 @@ OPC UA Subscriber
 | 运行统计 | 输出 accepted、released、dropped_loss、dropped_queue、shaped_deferrals、credit_deferrals |
 | 端到端时延统计 | 按优先级统计 p50/p90/p99/max/mean 时延、抖动与乱序，CSV/JSON 可导出 |
 | UDP 转发 | 支持 Linux/macOS BSD Socket 与 Windows Winsock2 |
-| open62541 | 链接 open62541 1.5；Linux 原生 PubSub 模式使用 UDP/UADP |
+| open62541 | 链接 open62541 1.5.9；Linux 原生 PubSub 模式使用 UDP/UADP |
 
 ## 四、目录结构
 
@@ -95,6 +95,8 @@ TsnHub/
 ├── CMakeLists.txt
 ├── conanfile.py
 ├── conandata.yml
+├── conan_provider.cmake        # CMake 的 Conan 提供者桥接（配合 conan install --build=missing）
+├── SECURITY.md                 # 安全策略与漏洞报告渠道
 └── Logo.png
 ```
 
@@ -115,9 +117,20 @@ TsnHub/
 - Conan 2.x
 - C++17 编译器
 - CLI11 2.6
-- open62541 1.5
+- open62541 1.5.9
 
 Portable PubSub 模式也可以在 macOS 和 Windows 构建。open62541 原生 UDP/UADP PubSub 模式统一以 Linux/Docker 为目标环境。
+
+Windows 上跑单元测试有一个前提：Git for Windows 自带的 `mingw64/bin`（Git Bash 里是 `/mingw64/bin`，
+实际路径 `D:/Environment/Git/mingw64/bin`）里有一份 ABI 不同的 `libstdc++-6.dll`，它默认排在
+`PATH` 前面；若它先于 WinLibs 的运行时被加载，测试进程会直接段错误。因此必须把 WinLibs 的
+`mingw64/bin` 目录**前置**到 `PATH`，例如：
+
+```bash
+export PATH="/c/Users/Dlut/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin:$PATH"
+```
+
+同一目录下的 MinGW 工具链也是构建本身所需（`cmake -G "MinGW Makefiles"`）。
 
 ## 六、本地构建
 
@@ -148,6 +161,14 @@ ctest --test-dir build-portable --output-on-failure
 不依赖这两个包，始终可构建。若显式要求 `TSNHUB_USE_OPEN62541_PUBSUB=ON` 却找不到
 open62541，配置阶段直接报错，不会静默降级成 Portable 模式。
 
+**没有 open62541（或没有 CLI11）时不存在 `TsnHub` 可执行文件，因此 §九 里以
+`--stats-format` / `--stats-file` / `--run-ms` 驱动的测量命令也跑不了。** 原因是硬性的：
+`main.cpp:8` 无条件 `#include <open62541/config.h>`（`--capabilities` 的版本号输出、
+原生模式的 URL 解析都要它），`CMakeLists.txt:66` 的 `if(CLI11_FOUND AND open62541_FOUND)`
+要求两者同时存在才创建 `TsnHub` 目标。此条件下能验证的只有 `tsnhub_core` 与 10 个
+单元测试（见 §十三）；要产出 CSV/JSON 统计数据集，必须先装好 open62541 与 CLI11，
+再按 §六 的 conan 流程或 §十二 的 Docker 镜像构建。
+
 查看当前构建能力：
 
 ```bash
@@ -157,7 +178,7 @@ open62541，配置阶段直接报错，不会静默降级成 Portable 模式。
 输出示例：
 
 ```text
-open62541=1.5.0
+open62541=1.5.9
 native_pubsub=false
 portable_pubsub=true
 portable_scheduler=true
@@ -205,6 +226,25 @@ stats_formats=summary,table,csv,json
 | `--seed` | 随机种子 |
 | `--capabilities` | 输出构建能力并退出 |
 
+原生模式（`--mode native`，需要 open62541 + CLI11）专用参数：
+
+| 参数 | 说明 |
+|---|---|
+| `--mode` | 传输模式：`portable`（默认）或 `native` |
+| `--subscribe-url` | 原生模式输入 URL（`opc.udp://0.0.0.0:4841`） |
+| `--publish-url` | 原生模式输出 URL |
+| `--publisher-bind-url` | 原生模式 writer 的**本地绑定** URL；open62541 ≥ 1.5 拒绝 UDP 端口 0，因此它必须是固定端口（默认 `opc.udp://0.0.0.0:4843`），且不能与 `--subscribe-url` 或同一主机上 subscriber 的绑定端口冲突 |
+| `--input-publisher-id` | 期望的上游 PublisherId |
+| `--input-writer-group-id` | 期望的上游 WriterGroupId |
+| `--input-writer-id` | 期望的上游 DataSetWriterId |
+| `--output-publisher-id` | TsnHub 输出的 PublisherId |
+| `--output-writer-group-id` | TsnHub 输出的 WriterGroupId |
+| `--output-writer-id` | TsnHub 输出的 DataSetWriterId |
+| `--publish-interval-ms` | 原生模式发布间隔（毫秒） |
+| `--priority-rule` | 原生模式优先级规则 `publisher:writerGroup:writer:priority`，可重复；单个分量可写 `*` 通配，但三个分量全通配会被拒绝 |
+| `--priority-map-file` | 每行一条优先级规则的纯文本文件，支持 `#` 注释与空行 |
+| `--input-default-priority` | 没有规则命中时使用的优先级（默认 0，取值 0～7） |
+
 按 `Ctrl+C` 或发送 `SIGTERM` 后，节点停止并输出统计信息。
 
 ## 八、Gate 配置示例
@@ -238,18 +278,22 @@ sequence 回退（乱序）与重复的次数。
 （`SchedulerConfig::latencyRetention`，默认 16384）后启用固定种子的蓄水池抽样，
 内存占用有界；此时 `retained` 字段给出实际参与分位计算的样本数，`samples` 始终是全部帧数。
 
-运行结束时按 `--stats-format` 输出：
+运行结束时按 `--stats-format` 输出（这些开关属于 `TsnHub` CLI，需要 open62541 + CLI11 才能构建，
+见 §六）：
 
 | 格式 | 内容 |
 |---|---|
 | `summary` | 单行计数器（默认），保持既有 `accepted=/released=/dropped_loss=/dropped_queue=` 前缀，另附 `shaped_deferrals=`、`credit_deferrals=`、`latency_samples=` |
 | `table` | 人类可读的按优先级分位数表 |
 | `csv` | 每优先级一行，含 min/p50/p90/p99/max/mean/jitter、乱序、重复、offered 与 loss_rate/drop_rate |
-| `json` | 同一组数据的 JSON 对象，`note` 字段回带本次运行的配置 |
+| `json` | 与 CSV 同源的 JSON 对象：`totals` 含 accepted/released/dropped_loss/dropped_queue/shaped_deferrals/credit_deferrals/latency_samples，`priorities` 数组含 CSV 的全部逐优先级字段，`note` 字段回带本次运行的配置 |
 
 CSV 的 `offered = accepted + dropped_loss + dropped_queue`，与 `loss_rate`、`drop_rate`
-一起构成丢包-负载曲线的最小充分统计量：横轴取负载（offered 或 accepted），纵轴取 loss_rate，
-即可画出随负载变化的丢包曲线，而无需改动任何一行代码。
+一起构成丢包-负载曲线的最小充分统计量。注意两列口径不同：
+`loss_rate = dropped_loss / offered` 只统计 `--loss` 指定的随机丢包，其期望值就是 `--loss`
+本身，与负载无关；`drop_rate = (dropped_loss + dropped_queue) / offered` 才包含队列容量
+溢出（`dropped_queue`），会随负载上升。因此画"随负载变化的丢包曲线"应以 `offered` 为横轴、
+`drop_rate` 为纵轴；若横轴用 `loss_rate`，得到的是一条水平线（等于 `--loss`），不能反映拥塞。
 
 `--stats-file` 可把统计重定向到文件，方便一次实验写一份数据集；不指定时全部打到 stdout。
 
@@ -264,10 +308,9 @@ CSV 的 `offered = accepted + dropped_loss + dropped_queue`，与 `loss_rate`、
   --stats-format csv --stats-file run-100m.csv --run-ms 60000
 ```
 
-拥塞（"拥塞"在 README 早期版本中仅被宣称）现在由两级限速如实实现：`--shape-mbps`
-令牌桶把出队序列化成端口线速上的字节流，令牌不足则推迟并计入 `shaped_deferrals`；
-`--credit-frames-per-window` 再限制单个 GCL 窗口的下发帧数，超出部分顺延到下一个窗口
-并计入 `credit_deferrals`。两者都只推迟、不丢弃，推迟帧仍占队列容量。
+拥塞由两级限速实现：`--shape-mbps` 令牌桶把出队序列化成端口线速上的字节流，令牌不足则推迟
+并计入 `shaped_deferrals`；`--credit-frames-per-window` 再限制单个 GCL 窗口的下发帧数，超出部分
+顺延到下一个窗口并计入 `credit_deferrals`。两者都只推迟、不丢弃，推迟帧仍占队列容量。
 
 ## 十、Portable PubSub Envelope
 
@@ -314,6 +357,7 @@ DataSetWriter published variable
 ```bash
 TsnHub --mode native \
   --subscribe-url opc.udp://0.0.0.0:4841 \
+  --publisher-bind-url opc.udp://0.0.0.0:4843 \
   --publish-url opc.udp://subscriber:4842 \
   --input-publisher-id 1 \
   --input-writer-group-id 1 \
@@ -325,10 +369,17 @@ TsnHub --mode native \
   --delay-us 200
 ```
 
+`--publisher-bind-url` 不能省略：open62541 把 PubSubConnection URL 当作 writer 的本地绑定地址
+（`pubsub/Open62541Bridge.cpp:161`），而 open62541 ≥ 1.5 拒绝 UDP 端口 0。省略该参数时 writer
+会落到默认的临时端口，在某些版本上直接导致连接创建失败；把它设为与 `--subscribe-url` 不同的
+固定端口即可复现三节点链路。
+
 ### 原生模式优先级映射
 
 原生模式下每一条 inbound 流的优先级由 `(PublisherId, WriterGroupId, DataSetWriterId)`
-三元组决定，规则通过 `--priority-rule`（可重复）或 `--priority-map-file`（每行一条）给出：
+三元组决定，规则通过 `--priority-rule`（可重复）或 `--priority-map-file`（每行一条）给出。
+`--priority-map-file` 指向的纯文本文件支持 `#` 起始的行注释与空行（`PriorityMap::loadFile`
+会先剥掉 `#` 及其后内容再逐行解析），因此可以按 stream 分组并加说明：
 
 ```bash
 TsnHub --mode native \
@@ -337,10 +388,19 @@ TsnHub --mode native \
   --gate 1000:0x40
 ```
 
+等价的映射文件写法（`#` 之后为注释，装载时被剥掉）：
+
+```text
+# 1:1:1:6
+1:1:1:6
+```
+
 规则格式为 `publisher:writerGroup:writer:priority`，`priority` 取 0～7（7 最高）。
-三个分量中任意一个可写成 `*` 表示通配；匹配时取**非通配分量最多**的一条规则，
-同具体度且可能同时命中的两条规则会在启动时报错退出，保证解析结果唯一。
-未命中任何规则时使用 `--input-default-priority`（默认 0）。
+三个分量中的任意一个可写成 `*` 表示通配；匹配时取**非通配分量最多**的一条规则，
+同具体度且可能同时命中的两条规则会在装载期报错退出，保证解析结果唯一。
+`*:*:*:p` 这类三个分量全通配的规则会被拒绝（`PriorityMap::add` 要求至少一个具体分量），
+需要"全部流量同一个优先级"时应改用 `--input-default-priority`。
+未命中任何规则时同样使用 `--input-default-priority`（默认 0）。
 
 之所以需要这层映射：open62541 的 DataSetReader 只接受与配置三元组完全一致的网络
 消息，因此该三元组就是帧的身份；而早期实现把 `frame.priority` 硬编码为 0，所有帧
@@ -378,7 +438,7 @@ TsnHub --mode native \
 
 ## 十二、Docker 三节点仿真
 
-Dockerfile 从源码构建 open62541 1.5.0，并开启：
+Dockerfile 从源码构建 open62541 1.5.9，并开启：
 
 ```text
 UA_ENABLE_PUBSUB=ON
@@ -425,7 +485,22 @@ docker compose down --remove-orphans
 | `simulator_node_pacing` | 端到端：任一开放窗口内下发帧数不超过信用上限、信用为 0 时保持旧的一次性抽空行为 |
 | `latency_stats` | 最近秩分位数、单样本确定性、相邻绝对差抖动、空摘要归零、优先级 8 以上夹紧、逐 stream 乱序/重复计数、负时延拒绝、蓄水池抽样有界且可复现、`clear` 复位 |
 | `scheduler_latency` | 令牌桶按字节精确记账与跨调用累计、速率 0 关闭整形、整形只推迟不丢弃、非法速率拒绝、放行帧按优先级计入时延统计、`offered` 自洽、CSV/JSON/摘要行格式 |
-| `native_pubsub_integration` | open62541 Publisher → TsnHub → Subscriber 原生 UDP/UADP 链路 |
+| `native_pubsub_integration` | open62541 Publisher → TsnHub → Subscriber 原生 UDP/UADP 链路（仅在 Linux 原生 PubSub 构建中注册，需要 open62541） |
+
+上表共列出 11 个测试，但 ctest 实际注册的数量取决于配置：
+
+- **有 open62541 的原生构建**（Linux/Docker，见 §六）：11 个全部注册。
+- **无 open62541 的 Portable 构建**（`-DTSNHUB_USE_OPEN62541_PUBSUB=OFF`）：`native_pubsub_integration`
+  不被注册，实测 `ctest -N` 报告 `Total Tests: 10`（Windows + MinGW 下同样如此）。
+
+Windows 上运行这些测试有一个前提：必须把 WinLibs 的 `mingw64/bin` 目录**前置**到 `PATH`
+（例如 `export PATH="/c/Users/Dlut/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin:$PATH"`）。
+Git for Windows 自带的 `mingw64/bin`（Git Bash 里是 `/mingw64/bin`，实际路径
+`D:/Environment/Git/mingw64/bin`）里也有一份 ABI 不同的 `libstdc++-6.dll`，它默认排在 `PATH` 前面；
+若它被加载，测试进程会在 `writeFixture`（`tests/PriorityMapTest.cpp:32`）写临时映射文件时
+段错误退出（实测退出码 139，`gdb` 回溯为 `#0..#2 libstdc++-6.dll` → `#3 writeFixture`）。
+把 WinLibs 的 bin 前置后同一份可执行文件正常通过；规避方法就是上面的 `PATH` 前置，
+或改用完整路径调用 `build-*/tsnhub_*_test.exe` 并同样前置 WinLibs bin。
 
 运行：
 
@@ -441,7 +516,7 @@ ctest --test-dir build-tsn/cmake --output-on-failure
 每个用例结束时还会打印实际执行的断言条数，便于在 CI 日志中确认检查真的跑过：
 
 ```text
-Scheduler tests passed (57 assertions)
+Scheduler tests passed (54 assertions)
 ```
 
 严格编译检查：

@@ -8,7 +8,7 @@
 
 TsnHub is the TSN simulation component of the FasterEdge ecosystem. It inserts a user-space TSN scheduler between the reception and re-publication of OPC UA PubSub data, used to simulate the queue, priority, gating, delay, jitter, packet loss and congestion behavior of time-sensitive networks on ordinary Linux hosts or in Docker environments.
 
-Every one of those behaviours is measurable: latency and jitter are reported per priority as p50/p99/max (see "9. Latency and Congestion Measurement"), congestion is implemented as the two-level rate limit of `--shape-mbps` token bucket plus `--credit-frames-per-window` window quota, and the loss rate versus load curve can be drawn straight from the `offered`/`loss_rate` columns of the statistics CSV.
+Every one of those behaviours is measurable: latency and jitter are reported per priority as p50/p99/max (see "9. Latency and Congestion Measurement"), and congestion is implemented as the two-level rate limit of `--shape-mbps` token bucket plus `--credit-frames-per-window` window quota. Note the two distinct loss definitions: `loss_rate = dropped_loss / offered` only reports the random loss set by `--loss` (`tsn/Scheduler.cpp:69`) and is independent of load, whereas the load-dependent figure is `drop_rate = (dropped_loss + dropped_queue) / offered`, because `dropped_queue` comes from queue-capacity overflow. A loss-versus-load curve must therefore plot `drop_rate` against `offered`.
 
 Target data flow:
 
@@ -62,7 +62,7 @@ The current repository already implements the Linux-native open62541 UDP/UADP Da
 | Runtime statistics | Outputs accepted, released, dropped_loss, dropped_queue, shaped_deferrals, credit_deferrals |
 | End-to-end latency statistics | Per-priority p50/p90/p99/max/mean latency, jitter and reordering; exportable as CSV/JSON |
 | UDP forwarding | Supports Linux/macOS BSD sockets and Windows Winsock2 |
-| open62541 | Links open62541 1.5; native PubSub mode on Linux uses UDP/UADP |
+| open62541 | Links open62541 1.5.9; native PubSub mode on Linux uses UDP/UADP |
 
 ## 4. Directory Structure
 
@@ -95,6 +95,8 @@ TsnHub/
 ├── CMakeLists.txt
 ├── conanfile.py
 ├── conandata.yml
+├── conan_provider.cmake        # Conan provider bridge for CMake (with `conan install --build=missing`)
+├── SECURITY.md                 # Security policy and vulnerability reporting channel
 └── Logo.png
 ```
 
@@ -115,9 +117,22 @@ Native PubSub and Docker files:
 - Conan 2.x
 - C++17 compiler
 - CLI11 2.6
-- open62541 1.5
+- open62541 1.5.9
 
 Portable PubSub mode can also be built on macOS and Windows. The open62541 native UDP/UADP PubSub mode targets Linux/Docker as the runtime environment.
+
+One prerequisite for running the unit tests on Windows: Git for Windows ships its own
+`mingw64/bin` (`/mingw64/bin` inside Git Bash, i.e. `D:/Environment/Git/mingw64/bin`) with an
+ABI-incompatible `libstdc++-6.dll` that comes earlier in `PATH` by default. If that one is
+loaded before the WinLibs runtime, the test binaries crash with a segmentation fault. The
+WinLibs `mingw64/bin` directory must therefore come **first** in `PATH`:
+
+```bash
+export PATH="/c/Users/Dlut/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin:$PATH"
+```
+
+The MinGW toolchain in that same directory is also what the build itself uses
+(`cmake -G "MinGW Makefiles"`).
 
 ## 6. Local Build
 
@@ -150,6 +165,16 @@ why. Neither `tsnhub_core` nor the unit tests depend on those packages, so they 
 build. Requesting `TSNHUB_USE_OPEN62541_PUBSUB=ON` without open62541 present is a hard
 configure error instead of a silent downgrade to portable mode.
 
+**Without open62541 (or without CLI11) there is no `TsnHub` executable at all, so the
+measurement commands in §9 that rely on `--stats-format` / `--stats-file` / `--run-ms`
+cannot run either.** The reason is structural: `main.cpp:8` unconditionally
+`#include <open62541/config.h>` (needed for the `--capabilities` version output and the
+native URL handling), and `CMakeLists.txt:66` guards the target with
+`if(CLI11_FOUND AND open62541_FOUND)`, so both packages must be present. In that state only
+`tsnhub_core` and the 10 unit tests (§13) can be verified; producing CSV/JSON datasets
+requires open62541 and CLI11 to be installed first, via the conan flow in §6 or the Docker
+image in §12.
+
 View the current build capabilities:
 
 ```bash
@@ -159,7 +184,7 @@ View the current build capabilities:
 Example output:
 
 ```text
-open62541=1.5.0
+open62541=1.5.9
 native_pubsub=false
 portable_pubsub=true
 portable_scheduler=true
@@ -207,6 +232,25 @@ Argument reference:
 | `--seed` | Random seed |
 | `--capabilities` | Prints build capabilities and exits |
 
+Native-mode arguments (`--mode native`, needs open62541 + CLI11):
+
+| Argument | Description |
+|---|---|
+| `--mode` | Transport mode: `portable` (default) or `native` |
+| `--subscribe-url` | Native-mode input URL (`opc.udp://0.0.0.0:4841`) |
+| `--publish-url` | Native-mode output URL |
+| `--publisher-bind-url` | **Local bind** URL of the native writer; open62541 ≥ 1.5 rejects UDP port 0, so this must be a fixed port (`opc.udp://0.0.0.0:4843` by default) distinct from `--subscribe-url` and from any co-located subscriber's bind port |
+| `--input-publisher-id` | Expected upstream PublisherId |
+| `--input-writer-group-id` | Expected upstream WriterGroupId |
+| `--input-writer-id` | Expected upstream DataSetWriterId |
+| `--output-publisher-id` | TsnHub output PublisherId |
+| `--output-writer-group-id` | TsnHub output WriterGroupId |
+| `--output-writer-id` | TsnHub output DataSetWriterId |
+| `--publish-interval-ms` | Native-mode publishing interval in milliseconds |
+| `--priority-rule` | Native-mode priority rule `publisher:writerGroup:writer:priority`, repeatable; a single component may be `*`, but a rule wildcard in all three components is rejected |
+| `--priority-map-file` | Plain-text file with one priority rule per line, `#` comments and blank lines allowed |
+| `--input-default-priority` | Priority used when no rule matches (default 0, range 0–7) |
+
 After pressing `Ctrl+C` or sending `SIGTERM`, the node stops and prints statistics.
 
 ## 8. Gate Configuration Example
@@ -244,19 +288,24 @@ a fixed-seed reservoir sample takes over, bounding memory; the `retained` field 
 how many samples actually contributed to the percentiles, while `samples` stays the count of
 all frames.
 
-At the end of a run `--stats-format` selects the output:
+At the end of a run `--stats-format` selects the output (these switches live on the `TsnHub`
+CLI, which needs open62541 + CLI11 to build — see §6):
 
 | Format | Content |
 |---|---|
 | `summary` | Single-line counters (default). Keeps the existing `accepted=/released=/dropped_loss=/dropped_queue=` prefix and adds `shaped_deferrals=`, `credit_deferrals=` and `latency_samples=` |
 | `table` | Human-readable per-priority percentile table |
 | `csv` | One row per priority with min/p50/p90/p99/max/mean/jitter, reordering, duplicates, offered and loss_rate/drop_rate |
-| `json` | The same data as a JSON object; the `note` field echoes the run configuration |
+| `json` | The same source data as CSV in JSON form: `totals` carries accepted/released/dropped_loss/dropped_queue/shaped_deferrals/credit_deferrals/latency_samples, the `priorities` array carries every per-priority CSV field, and the `note` field echoes the run configuration |
 
 In the CSV, `offered = accepted + dropped_loss + dropped_queue`; together with `loss_rate`
-and `drop_rate` this is the minimal sufficient statistic for a loss-rate versus load curve:
-take offered (or accepted) as the x axis and loss_rate as the y axis, and the curve is there
-without touching a line of code.
+and `drop_rate` this is the minimal sufficient statistic for a loss-rate versus load curve.
+The two columns measure different things: `loss_rate = dropped_loss / offered` counts only
+the random loss set by `--loss`, whose expected value is `--loss` itself and is independent
+of load, while `drop_rate = (dropped_loss + dropped_queue) / offered` also includes
+queue-capacity overflow (`dropped_queue`) and therefore rises with load. A loss-versus-load
+curve must use `offered` as the x axis and `drop_rate` as the y axis; plotting `loss_rate`
+yields a flat line at `--loss` and does not reflect congestion.
 
 `--stats-file` redirects the statistics to a file so one experiment produces one dataset;
 without it everything goes to stdout.
@@ -273,13 +322,12 @@ complete dataset with or without a signal channel.
   --stats-format csv --stats-file run-100m.csv --run-ms 60000
 ```
 
-Congestion — claimed but never implemented in earlier revisions of this README — is now
-honestly implemented as two levels of rate limiting. `--shape-mbps` drives a token bucket
-that serialises dequeued frames into a byte stream at the line rate; a token shortage defers
-and counts `shaped_deferrals`. `--credit-frames-per-window` additionally caps the frames
-released inside a single GCL window, deferring the excess to the next window and counting
-`credit_deferrals`. Both only defer, never drop, and deferred frames still occupy queue
-capacity.
+Congestion is implemented as two levels of rate limiting. `--shape-mbps` drives a token
+bucket that serialises dequeued frames into a byte stream at the line rate; a token shortage
+defers and counts `shaped_deferrals`. `--credit-frames-per-window` additionally caps the
+frames released inside a single GCL window, deferring the excess to the next window and
+counting `credit_deferrals`. Both only defer, never drop, and deferred frames still occupy
+queue capacity.
 
 ## 10. Portable PubSub Envelope
 
@@ -326,6 +374,7 @@ Native mode run example:
 ```bash
 TsnHub --mode native \
   --subscribe-url opc.udp://0.0.0.0:4841 \
+  --publisher-bind-url opc.udp://0.0.0.0:4843 \
   --publish-url opc.udp://subscriber:4842 \
   --input-publisher-id 1 \
   --input-writer-group-id 1 \
@@ -337,11 +386,20 @@ TsnHub --mode native \
   --delay-us 200
 ```
 
+`--publisher-bind-url` must not be omitted: open62541 treats the PubSubConnection URL as the
+writer's local bind address (`pubsub/Open62541Bridge.cpp:161`), and open62541 ≥ 1.5 rejects
+UDP port 0. Without it the writer falls back to an ephemeral port and, on some versions, the
+connection cannot be created at all; pinning it to a fixed port distinct from
+`--subscribe-url` is what makes the three-node chain reproducible.
+
 ### Native-mode priority mapping
 
 In native mode, the priority of every inbound stream is decided by its
 `(PublisherId, WriterGroupId, DataSetWriterId)` triple, configured through
-`--priority-rule` (repeatable) or `--priority-map-file` (one rule per line):
+`--priority-rule` (repeatable) or `--priority-map-file` (one rule per line).
+The file passed to `--priority-map-file` is plain text and accepts `#` line comments
+and blank lines (`PriorityMap::loadFile` strips the `#` comment before parsing each
+line), so rules can be grouped per stream with an explanation:
 
 ```bash
 TsnHub --mode native \
@@ -350,10 +408,20 @@ TsnHub --mode native \
   --gate 1000:0x40
 ```
 
+The equivalent map file (everything after `#` is stripped when the file is loaded):
+
+```text
+# 1:1:1:6
+1:1:1:6
+```
+
 A rule reads `publisher:writerGroup:writer:priority`, with `priority` in 0–7 (7 is
-highest). Any component may be `*` for a wildcard; the matching rule is the one
-with the most non-wildcard components. Two rules that can match the same stream
-at equal specificity are rejected at startup, so parsing stays deterministic.
+highest). Any one of the three components may be `*` for a wildcard; the matching rule is
+the one with the most non-wildcard components. Two rules that can match the same stream
+at equal specificity are rejected at load time, so parsing stays deterministic. A rule
+that is wildcard in all three components (`*:*:*:p`) is rejected as well
+(`PriorityMap::add` requires at least one concrete component) — to give every stream the
+same priority, use `--input-default-priority` instead.
 When no rule matches, `--input-default-priority` (default 0) applies.
 
 Why the mapping exists: open62541's DataSetReader only accepts network messages
@@ -402,7 +470,7 @@ credit, gate phase error within threshold).
 
 ## 12. Docker Three-Node Simulation
 
-The Dockerfile builds open62541 1.5.0 from source with:
+The Dockerfile builds open62541 1.5.9 from source with:
 
 ```text
 UA_ENABLE_PUBSUB=ON
@@ -449,7 +517,24 @@ docker compose down --remove-orphans
 | `simulator_node_pacing` | End to end: frames per open window never exceed the credit cap; credit 0 keeps the legacy drain-all behaviour |
 | `latency_stats` | Nearest-rank percentiles, single-sample determinism, mean absolute neighbour delta as jitter, zeroed empty summary, priority above 7 clamped, per-stream reordering/duplicate counting, negative latency rejected, bounded and reproducible reservoir retention, `clear` reset |
 | `scheduler_latency` | Token bucket charged byte-exactly and accruing across calls, rate 0 disabling shaping, shaping deferring without dropping, invalid rate rejected, released frames measured per priority, `offered` self-consistency, CSV/JSON/summary formats |
-| `native_pubsub_integration` | open62541 Publisher → TsnHub → Subscriber native UDP/UADP chain |
+| `native_pubsub_integration` | open62541 Publisher → TsnHub → Subscriber native UDP/UADP chain (registered only in a Linux native PubSub build with open62541 present) |
+
+The table lists 11 tests, but the number ctest actually registers depends on the configuration:
+
+- **Native build with open62541** (Linux/Docker, see §6): all 11 are registered.
+- **Portable build without open62541** (`-DTSNHUB_USE_OPEN62541_PUBSUB=OFF`): `native_pubsub_integration`
+  is not registered, and `ctest -N` reports `Total Tests: 10` (measured on Windows + MinGW too).
+
+Running these tests on Windows has one prerequisite: the WinLibs `mingw64/bin` directory must
+come **first** in `PATH`
+(e.g. `export PATH="/c/Users/Dlut/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin:$PATH"`).
+Git for Windows ships its own `mingw64/bin` (`/mingw64/bin` inside Git Bash, i.e.
+`D:/Environment/Git/mingw64/bin`) with an ABI-incompatible `libstdc++-6.dll` that comes earlier
+in `PATH` by default. If that one is loaded, the test binary dies with a segmentation fault
+(measured exit code 139; `gdb` backtrace `#0..#2 libstdc++-6.dll` → `#3 writeFixture`) while
+writing its temporary map file in `writeFixture` (`tests/PriorityMapTest.cpp:32`). Prepending
+the WinLibs bin directory makes the same executable pass. The workaround is that `PATH` prefix,
+or invoking `build-*/tsnhub_*_test.exe` by full path with the same prefix.
 
 Run:
 
@@ -467,7 +552,7 @@ text and an optional detail, then exit with status 1. Each case also prints the 
 assertions it actually executed, so CI logs show that the checks really ran:
 
 ```text
-Scheduler tests passed (57 assertions)
+Scheduler tests passed (54 assertions)
 ```
 
 Strict compile checks:

@@ -87,6 +87,7 @@ void writeJson(std::ostream &out, const RunReport &report) {
         << ", \"dropped_loss\": " << report.totals.droppedByLoss
         << ", \"dropped_queue\": " << report.totals.droppedByQueue
         << ", \"shaped_deferrals\": " << report.totals.shapedDeferrals
+        << ", \"credit_deferrals\": " << report.totals.creditDeferrals
         << ", \"latency_samples\": " << report.totals.latencySamples << "},\n";
     out << "  \"priorities\": [\n";
     for(std::size_t index = 0; index < report.latency.size(); ++index) {
